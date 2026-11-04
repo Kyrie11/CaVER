@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+outputs/
+*.pt
+*.db
+*.tfrecord*
+*.pkl
+*.zip
+*.egg-info/
+.env

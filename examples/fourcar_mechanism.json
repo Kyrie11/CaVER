@@ -1,0 +1,64 @@
+{
+  "fixture": "SYNTHETIC_PARAMETER_SEARCH_POSTHOC_NOT_NATURAL_FREQUENCY",
+  "config": "configs/fourcar_challenge.json",
+  "actions": {
+    "early": {
+      "ego_collision": false,
+      "downstream_collision": true,
+      "BC_collision": true,
+      "BC_clearance": -1.2494760983883635,
+      "ego_B_clearance": 2.591057783576426,
+      "response_onset": {
+        "A": null,
+        "B": 1.8,
+        "C": 3.4000000000000004
+      }
+    },
+    "late": {
+      "ego_collision": false,
+      "downstream_collision": false,
+      "BC_collision": false,
+      "BC_clearance": 0.5796892762914378,
+      "ego_B_clearance": 4.443919278742695,
+      "response_onset": {
+        "A": null,
+        "B": 1.8,
+        "C": 3.4000000000000004
+      }
+    }
+  },
+  "B_mediator_exchange": {
+    "base_a": {
+      "ego_contact": 0,
+      "downstream_contact": 1,
+      "BC_contact": 1,
+      "BC_clearance": -1.2494760983883635
+    },
+    "base_b": {
+      "ego_contact": 0,
+      "downstream_contact": 0,
+      "BC_contact": 0,
+      "BC_clearance": 0.5796892762914378
+    },
+    "a_with_b_mediator": {
+      "ego_contact": 0,
+      "downstream_contact": 0,
+      "BC_contact": 0,
+      "BC_clearance": 0.5796892762914378
+    },
+    "b_with_a_mediator": {
+      "ego_contact": 0,
+      "downstream_contact": 1,
+      "BC_contact": 1,
+      "BC_clearance": -1.2494760983883635
+    },
+    "source": "SIMULATOR_STRUCTURAL_INTERVENTION",
+    "physical_consistency_replay_not_guaranteed": true
+  },
+  "action_max_position_distance_m": 2.7720000000000056,
+  "limitations": [
+    "posthoc manually searched surrogate-only fixture",
+    "no CARLA physics",
+    "no independent reference model test"
+  ]
+}

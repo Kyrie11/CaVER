@@ -1,0 +1,62 @@
+{
+  "provenance": "SYNTHETIC_POSTHOC_RETUNED_AFTER_DELAY_INDEX_FIX_NOT_NATURAL_FREQUENCY",
+  "search_seed": 34,
+  "search_iteration": 56,
+  "horizon_seconds": 7.0,
+  "dt_seconds": 0.1,
+  "actors": {
+    "E": {
+      "x": 26.740459236732818,
+      "y": -3.5,
+      "vx": 12.37440140059825
+    },
+    "A": {
+      "x": 74.36083432759543,
+      "y": 0.0,
+      "vx": 14.8
+    },
+    "B": {
+      "x": 5.0,
+      "y": 0.0,
+      "vx": 17.532781283060224
+    },
+    "C": {
+      "x": -18.09486605346797,
+      "y": 0.0,
+      "vx": 15.027767241527343
+    }
+  },
+  "policies": {
+    "B": {
+      "delay": 0.22203426769760706,
+      "max_brake": 6.15144370246677,
+      "desired_headway": 1.0776239942410388,
+      "max_accel": 1.2,
+      "comfortable_brake": 4.121681294413011,
+      "min_gap": 2.0
+    },
+    "C": {
+      "delay": 1.0730712151591353,
+      "max_brake": 2.1036177206159437,
+      "desired_headway": 1.1422396730862596,
+      "max_accel": 1.2,
+      "comfortable_brake": 2.2931130485165188,
+      "min_gap": 2.0
+    }
+  },
+  "actions": [
+    {
+      "action_id": "early",
+      "pulse_begin": 0.5,
+      "pulse_end": 1.6,
+      "decel": 1.8
+    },
+    {
+      "action_id": "late",
+      "pulse_begin": 1.9,
+      "pulse_end": 3.0,
+      "decel": 1.8
+    }
+  ],
+  "revision_note": "Retuned C start x +1.5m because corrected delayed-history index changes the original synthetic contact; not fresh external validation."
+}

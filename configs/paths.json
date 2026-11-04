@@ -1,0 +1,9 @@
+{
+  "womd": "/data0/senzeyu2/dataset/WOMD/waymo_open_dataset_motion_v_1_3_1",
+  "nuplan": "/data0/senzeyu2/dataset/nuplan/data/cache",
+  "reactsim": "/data0/senzeyu2/dataset/ReactSim-Bench/data/custom_behaviors",
+  "nuplan_maps": "/data0/senzeyu2/dataset/nuplan/maps",
+  "reactsim_repository": "/data0/senzeyu2/dataset/ReactSim-Bench/repo",
+  "carla_host": "127.0.0.1",
+  "carla_port": 2000
+}

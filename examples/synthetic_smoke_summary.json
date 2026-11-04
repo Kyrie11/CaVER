@@ -1,0 +1,12 @@
+{
+  "source": "SMALL_SYNTHETIC_END_TO_END_SMOKE_ONLY",
+  "calibration_and_test_scenes": {
+    "test": 4,
+    "calibration": 6
+  },
+  "dse_accepted": 0,
+  "dse_unknown": 4,
+  "joint_interval_coverage_on_this_tiny_test": 1.0,
+  "rq1_synthetic_matched_pairs": 0,
+  "disclaimer": "Not WOMD, Waymax, nuPlan, CARLA or ReactSim empirical result; small-sample calibration is too wide to accept actions; all results simulator-dependent."
+}

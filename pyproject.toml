@@ -1,19 +1,21 @@
 [build-system]
-requires = ["setuptools>=65", "wheel"]
+requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
-
 [project]
-name = "ride-driving-research"
-version = "0.1.0"
-description = "RIDE research gate for response-model-induced decision errors in driving"
+name = "caver-planning"
+version = "0.2.0"
+description = "Auditable research implementation of cascade-boundary contrast, decision evidence, and targeted verification"
 requires-python = ">=3.10"
-dependencies = ["numpy>=1.23,<3"]
-
+dependencies = ["numpy>=1.24,<3", "scipy>=1.10", "torch>=2.0", "protobuf>=4"]
 [project.optional-dependencies]
+womd = ["tensorflow>=2.12"] # Install version-compatible waymo-open-dataset wheel separately
+waymax = ["waymax"]
+nuplan = []
+carla = []
 test = ["pytest>=7"]
-
+[project.scripts]
+caver = "caver.cli:main"
 [tool.setuptools.packages.find]
-include = ["ride*"]
-
+include = ["caver*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
