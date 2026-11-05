@@ -19,3 +19,4 @@ caver = "caver.cli:main"
 include = ["caver*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["scripts"]

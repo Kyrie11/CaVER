@@ -82,3 +82,37 @@ def test_missing_evidence_is_not_invented():
     y = matched_legal_ego_safe_yield([row])
     assert y["matched_yield"] == 0.0
     assert y["status"] == "NOT_MEASURED"
+
+
+def test_primary_underresolution_denominator_is_reference_resolved_and_clustered():
+    resolved_prediction = _row()
+    resolved_prediction["scene_id"] = "resolved-ok"
+
+    resolved_underprediction = _row()
+    resolved_underprediction["scene_id"] = "resolved-under"
+    resolved_underprediction["predicted"]["early/A|B"] = .10
+    resolved_underprediction["predicted"]["late/A|B"] = .10
+
+    reference_unresolved = _row()
+    reference_unresolved["scene_id"] = "mc-unresolved"
+    reference_unresolved["audit_worlds_per_family"] = 1
+    reference_unresolved["predicted"]["early/A|B"] = .10
+    reference_unresolved["predicted"]["late/A|B"] = .10
+
+    out = critical_pair_audit(
+        [resolved_prediction, resolved_underprediction, reference_unresolved],
+        contrast_threshold=.20, detect_threshold=.05, n_boot=100, seed=7,
+    )
+
+    assert out["critical_pair_tests"] == 3
+    assert out["reference_sign_resolved_pairs"] == 2
+    assert out["reference_unresolved_pairs"] == 1
+    # The paper's primary denominator excludes the MC-unresolved pair.
+    assert out["underresolution_rate"] == .5
+    assert out["critical_miss_rate_reference_resolved"] == .5
+    # The former all-critical rate remains available as a supplementary value.
+    assert out["underresolution_rate_all_critical"] == 2 / 3
+    ci = out["scene_cluster_bootstrap"]["underresolution_rate_reference_resolved"]
+    assert ci["cluster"] == "scene"
+    assert ci["n_scenes"] == 2
+    assert ci["ci95"] is not None

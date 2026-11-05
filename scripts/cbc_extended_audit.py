@@ -181,12 +181,13 @@ def _pair_records(
     contrast_threshold: float,
     detect_threshold: float,
     only_matched: bool,
+    alpha: float,
 ) -> list[dict[str, Any]]:
-    if only_matched and not _matched(row):
+    if only_matched and not _matched(row, pair_key=f"{early}|{late}"):
         return []
     pred = row.get("predicted", {})
     aud = row.get("audited", {})
-    radius = _reference_radius(row)
+    radius = _reference_radius(row, alpha=alpha)
     out: list[dict[str, Any]] = []
     for pair in row.get("pairs", []):
         tk = f"{early}/{pair}"
@@ -225,29 +226,68 @@ def critical_pair_audit(
     detect_threshold: float = 0.05,
     only_matched: bool = True,
     alpha: float = 0.05,
+    n_boot: int = 2000,
+    seed: int = 17,
 ) -> dict[str, Any]:
-    """Separate sign errors, under-resolution, and pair-level false-safe cases."""
+    """Separate sign errors, under-resolution, and critical misses.
+
+    The paper's primary denominator is the reference-resolved critical-pair
+    set.  All-critical rates are retained as supplementary diagnostics only.
+    Confidence intervals resample scenes, keeping all pair rows from a scene
+    together.
+    """
+    if not 0.0 < alpha < 1.0:
+        raise ValueError("alpha must be strictly between 0 and 1")
     rows = list(records)
     pairs = [p for row in rows for p in _pair_records(
         row, early=early, late=late, contrast_threshold=contrast_threshold,
-        detect_threshold=detect_threshold, only_matched=only_matched)]
+        detect_threshold=detect_threshold, only_matched=only_matched, alpha=alpha)]
     resolved_ref = [p for p in pairs if p["reference_sign_resolved"] is True]
+    unresolved_ref = [p for p in pairs if p["reference_sign_resolved"] is False]
+    unknown_ref = [p for p in pairs if p["reference_sign_resolved"] is None]
     pred_resolved = [p for p in pairs if p["predicted_resolved"]]
+
+    for pair in pairs:
+        pair["critical_miss"] = bool(pair["sign_error"] or pair["underresolution"])
+
+    scene_bootstrap = {
+        "sign_error_rate_reference_resolved": _bootstrap_scene_rate(
+            resolved_ref, "sign_error", n_boot=n_boot, seed=seed),
+        "underresolution_rate_reference_resolved": _bootstrap_scene_rate(
+            resolved_ref, "underresolution", n_boot=n_boot, seed=seed + 1),
+        "critical_miss_rate_reference_resolved": _bootstrap_scene_rate(
+            resolved_ref, "critical_miss", n_boot=n_boot, seed=seed + 2),
+    }
+
+    mean = lambda xs, key: float(np.mean([bool(x[key]) for x in xs])) if xs else None
     return {
         "status": "MEASURED" if pairs else NOT_MEASURED,
+        "primary_metrics_status": "MEASURED" if resolved_ref else NOT_MEASURED,
         "definition": {
             "sign_error": "resolved prediction has opposite sign to reference delta",
             "underresolution": f"abs(predicted_delta) < {detect_threshold}",
+            "critical_miss": "sign_error OR underresolution",
             "false_safe_pair": f"max(predicted risks)<{detect_threshold} and max(reference risks)>={contrast_threshold}",
             "critical_pair": f"abs(reference_delta)>={contrast_threshold}",
+            "primary_denominator": "reference-resolved critical pairs: abs(reference_delta) > finite-reference MC radius",
+            "confidence_interval": "scene-cluster bootstrap; pair rows within a scene are resampled together",
+            "mc_alpha": alpha,
         },
         "critical_pair_tests": len(pairs),
         "reference_sign_resolved_pairs": len(resolved_ref),
+        "reference_unresolved_pairs": len(unresolved_ref),
+        "reference_resolution_unknown_pairs": len(unknown_ref),
         "predicted_resolved_pairs": len(pred_resolved),
-        "sign_error_rate_all_critical": float(np.mean([p["sign_error"] for p in pairs])) if pairs else None,
-        "sign_error_rate_reference_resolved": float(np.mean([p["sign_error"] for p in resolved_ref])) if resolved_ref else None,
-        "underresolution_rate": float(np.mean([p["underresolution"] for p in pairs])) if pairs else None,
-        "false_safe_pair_rate": float(np.mean([p["false_safe_pair"] for p in pairs])) if pairs else None,
+        "sign_error_rate_all_critical": mean(pairs, "sign_error"),
+        "sign_error_rate_reference_resolved": mean(resolved_ref, "sign_error"),
+        # Primary paper metric: denominator is reference-resolved critical pairs.
+        "underresolution_rate": mean(resolved_ref, "underresolution"),
+        "critical_miss_rate_reference_resolved": mean(resolved_ref, "critical_miss"),
+        # Supplementary rates preserve visibility into MC-unresolved critical pairs.
+        "underresolution_rate_all_critical": mean(pairs, "underresolution"),
+        "critical_miss_rate_all_critical": mean(pairs, "critical_miss"),
+        "false_safe_pair_rate": mean(pairs, "false_safe_pair"),
+        "scene_cluster_bootstrap": scene_bootstrap,
         "rows": pairs,
     }
 
@@ -273,6 +313,29 @@ def _bootstrap_scene_ratio(
         "ci95": [float(np.quantile(vals, .025)), float(np.quantile(vals, .975))] if vals else None,
         "n_scenes": len(a), "n_boot": len(vals), "cluster": "scene",
     }
+
+
+def _bootstrap_scene_rate(
+    items: Sequence[Mapping[str, Any]], key: str, *, n_boot: int = 2000, seed: int = 17
+) -> dict[str, Any]:
+    """Bootstrap a pair-level rate while resampling whole scene clusters."""
+    if not items:
+        return {"status": NOT_MEASURED, "point": None, "ci95": None, "n_scenes": 0}
+    if any(item.get("scene_id") is None for item in items):
+        missing = sum(item.get("scene_id") is None for item in items)
+        return {
+            "status": NOT_MEASURED, "point": float(np.mean([bool(x[key]) for x in items])),
+            "ci95": None, "n_scenes": len({x.get("scene_id") for x in items if x.get("scene_id") is not None}),
+            "reason": f"scene_id missing for {missing} reference-resolved critical pair rows",
+        }
+    by_scene: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
+    for item in items:
+        by_scene[str(item["scene_id"])].append(item)
+    counts = [
+        (sum(int(bool(item[key])) for item in group), len(group))
+        for group in by_scene.values()
+    ]
+    return _bootstrap_scene_ratio(counts, n_boot=n_boot, seed=seed)
 
 
 def reference_flip_audit(
@@ -547,7 +610,9 @@ if __name__ == "__main__":
     parser.add_argument("records", help="JSONL or JSONL.gz file produced by CaVER")
     parser.add_argument("--out", required=True, help="Output JSON report")
     parser.add_argument("--bootstrap", type=int, default=2000,
-                        help="Scene bootstrap resamples for reference flip CI")
+                        help="Scene bootstrap resamples for critical-pair and reference-flip CIs")
+    parser.add_argument("--seed", type=int, default=17,
+                        help="Random seed for scene-cluster bootstrap intervals")
     args = parser.parse_args()
     opener = gzip.open if args.records.endswith(".gz") else open
     rows = []
@@ -555,7 +620,11 @@ if __name__ == "__main__":
         for line in fh:
             if line.strip():
                 rows.append(json.loads(line))
-    report = extended_audit(rows, flip={"n_boot": args.bootstrap})
+    report = extended_audit(
+        rows,
+        critical={"n_boot": args.bootstrap, "seed": args.seed},
+        flip={"n_boot": args.bootstrap, "seed": args.seed},
+    )
     with open(args.out, "w", encoding="utf-8") as fh:
         json.dump(report, fh, ensure_ascii=False, indent=2)
     print(json.dumps({
