@@ -1,0 +1,447 @@
+{
+  "version": "CBC_V3_REANALYSIS_OF_UPLOADED_V2_REPORTS",
+  "source": "CaVER_CBC_report_bundle.zip supplied by user",
+  "new_retraining_performed": false,
+  "interpretation": "All reference action outcomes are synthetic-reactor conditional; WOMD supplies observed initialization, not both counterfactual futures",
+  "datasets": {
+    "synthetic": {
+      "population": "enriched synthetic stress",
+      "samples": {
+        "scenes": 120,
+        "matched_proxy_scenes": 120,
+        "matched_ego_safe_scenes": 100,
+        "reference_critical_pairs": 32,
+        "reference_sign_resolved_pairs_legacy_per_pair": 32,
+        "all_pair_count": 360,
+        "all_pair_reference_flip_count": 107,
+        "matched_pair_count": 360,
+        "matched_pair_reference_flip_count": 107,
+        "note": "Matched count known from 3 pairs per four-car scene, WOMD 3 pair flips all outside matched subset according to boundary report"
+      },
+      "metrics": {
+        "anchor_copy": {
+          "reference_resolved_sign_error_rate": 1.0,
+          "near_boundary_pair_risk_mae": 0.314709595959596,
+          "downstream_union_reference_risk_mae": 0.09956597222222222,
+          "matched_ego_safe_safety_ranking_regret": 0.10088541666666666
+        },
+        "source": {
+          "reference_resolved_sign_error_rate": 0.8125,
+          "near_boundary_pair_risk_mae": 0.3109217171717172,
+          "downstream_union_reference_risk_mae": 0.09817708333333333,
+          "matched_ego_safe_safety_ranking_regret": 0.10088541666666666
+        },
+        "anchor_full": {
+          "reference_resolved_sign_error_rate": 0.21875,
+          "near_boundary_pair_risk_mae": 0.2000021318860371,
+          "downstream_union_reference_risk_mae": 0.10124894841289157,
+          "matched_ego_safe_safety_ranking_regret": 0.0
+        },
+        "anchor_graph": {
+          "reference_resolved_sign_error_rate": 0.3125,
+          "near_boundary_pair_risk_mae": 0.13094595708697065,
+          "downstream_union_reference_risk_mae": 0.038463915855879806,
+          "matched_ego_safe_safety_ranking_regret": 0.0
+        },
+        "full": {
+          "reference_resolved_sign_error_rate": 0.0625,
+          "near_boundary_pair_risk_mae": 0.17777253002657176,
+          "downstream_union_reference_risk_mae": 0.08246644233815856,
+          "matched_ego_safe_safety_ranking_regret": 0.0
+        },
+        "no_events": {
+          "reference_resolved_sign_error_rate": 0.0625,
+          "near_boundary_pair_risk_mae": 0.15505115584161067,
+          "downstream_union_reference_risk_mae": 0.08322300024590919,
+          "matched_ego_safe_safety_ranking_regret": 0.0
+        }
+      },
+      "event_vs_no_events_paired_scene_bootstrap": {
+        "critical_pair_sign_error_rate": {
+          "delta_method_minus_source": 0.0,
+          "bootstrap_95pct_ci": [
+            0.0,
+            0.0
+          ],
+          "resamples_valid": 1000
+        },
+        "reference_resolved_sign_error_rate": {
+          "delta_method_minus_source": 0.0,
+          "bootstrap_95pct_ci": [
+            0.0,
+            0.0
+          ],
+          "resamples_valid": 1000
+        },
+        "matched_ego_safe_safety_ranking_regret": {
+          "delta_method_minus_source": 0.0,
+          "bootstrap_95pct_ci": [
+            0.0,
+            0.0
+          ],
+          "resamples_valid": 1000
+        },
+        "pair_reference_risk_mae": {
+          "delta_method_minus_source": -0.00023396707345319236,
+          "bootstrap_95pct_ci": [
+            -0.002263021259299455,
+            0.0018011113681783671
+          ],
+          "resamples_valid": 1000
+        },
+        "downstream_union_reference_risk_mae": {
+          "delta_method_minus_source": -0.0007038532749452395,
+          "bootstrap_95pct_ci": [
+            -0.006790975668197088,
+            0.005401249663341723
+          ],
+          "resamples_valid": 1000
+        }
+      },
+      "boundary_screen": {
+        "pair_comparisons": 360,
+        "reference_contact_flip_pairs": 107,
+        "proposed_reused_pairs": 248,
+        "reuse_fraction": 0.6888888888888889,
+        "missed_flip_pairs": 6,
+        "miss_fraction_given_reference_flip": 0.056074766355140186,
+        "missed_flip_mass_sum": 2.640625,
+        "source_model_missed_reference_flip_fraction": 0.9345794392523364,
+        "clopper_pearson_95pct_upper_miss_fraction": 0.10767195607675922
+      },
+      "corrected_gate": {
+        "verdict": "DESCRIPTIVE_SIMULATOR_CONDITIONAL_SIGNAL_ONLY",
+        "novelty_verdict": "INCREMENTAL_GRAPH_AND_EVENT_GAIN_NOT_DEMONSTRATED",
+        "protocol": "CBC_V3_ABLATION_AND_EVIDENCE_ADEQUACY",
+        "evidence_gaps": [],
+        "declared_thresholds": {
+          "heldout_scenes": 100,
+          "kinematic_matched_scenes": 50,
+          "reference_resolved_critical_pairs": 30,
+          "reference_worlds": 128
+        },
+        "observed_sample": {
+          "heldout_scenes": 120,
+          "kinematic_matched_scenes": 120,
+          "reference_resolved_critical_pairs": 32,
+          "reference_worlds_per_action": 192,
+          "reference_matched_contact_flip_pairs": null,
+          "reference_all_contact_flip_pairs": null,
+          "reference_all_pair_comparisons": null,
+          "reference_matched_pair_comparisons": null,
+          "matched_ego_safe_scenes": 100,
+          "match_failure_codes": null,
+          "reference_scene_familywise_resolved_critical_n": null
+        },
+        "method_comparison": {
+          "anchor_copy": {
+            "resolved_critical_sign_error_rate": 1.0,
+            "all_critical_underresolution_rate": 1.0,
+            "near_boundary_pair_risk_mae": 0.314709595959596,
+            "union_risk_mae": 0.09956597222222222,
+            "matched_pair_ranking_regret": 0.10088541666666666
+          },
+          "source": {
+            "resolved_critical_sign_error_rate": 0.8125,
+            "all_critical_underresolution_rate": 0.8125,
+            "near_boundary_pair_risk_mae": 0.3109217171717172,
+            "union_risk_mae": 0.09817708333333333,
+            "matched_pair_ranking_regret": 0.10088541666666666
+          },
+          "full": {
+            "resolved_critical_sign_error_rate": 0.0625,
+            "all_critical_underresolution_rate": 0.0625,
+            "near_boundary_pair_risk_mae": 0.17777253002657176,
+            "union_risk_mae": 0.08246644233815856,
+            "matched_pair_ranking_regret": 0.0
+          },
+          "no_events": {
+            "resolved_critical_sign_error_rate": 0.0625,
+            "all_critical_underresolution_rate": 0.0625,
+            "near_boundary_pair_risk_mae": 0.15505115584161067,
+            "union_risk_mae": 0.08322300024590919,
+            "matched_pair_ranking_regret": 0.0
+          },
+          "anchor_full": {
+            "resolved_critical_sign_error_rate": 0.21875,
+            "all_critical_underresolution_rate": 0.0,
+            "near_boundary_pair_risk_mae": 0.2000021318860371,
+            "union_risk_mae": 0.10124894841289157,
+            "matched_pair_ranking_regret": 0.0
+          },
+          "anchor_graph": {
+            "resolved_critical_sign_error_rate": 0.3125,
+            "all_critical_underresolution_rate": 0.28125,
+            "near_boundary_pair_risk_mae": 0.13094595708697065,
+            "union_risk_mae": 0.038463915855879806,
+            "matched_pair_ranking_regret": 0.0
+          }
+        },
+        "incremental_ablation": {
+          "anchor_graph_minus_anchor_copy": {
+            "delta": -0.6842198492955703,
+            "paired_scene_ci95": [
+              -0.8485690235690236,
+              -0.5172413793103448
+            ],
+            "valid_bootstrap_resamples": 1000,
+            "status": "SUPPORTS_INCREMENTAL_GAIN"
+          },
+          "anchor_graph_minus_equal_anchor_budget_without_graph": {
+            "status": "NOT_MEASURED",
+            "delta": null,
+            "paired_scene_ci95": null
+          },
+          "full_minus_equal_full_source_budget_no_events": {
+            "delta": 0.0,
+            "paired_scene_ci95": [
+              0.0,
+              0.0
+            ],
+            "valid_bootstrap_resamples": 1000,
+            "status": "INCONCLUSIVE_OR_NO_GAIN"
+          },
+          "graph_strictly_better_than_anchor_full_point_estimate": false,
+          "full_strictly_better_than_no_events_point_estimate": false
+        },
+        "empirical_boundary_screen": {
+          "status": "FITTED_EMPIRICAL_SCREENER_NOT_CERTIFIED",
+          "heldout": {
+            "pair_comparisons": 360,
+            "reference_contact_flip_pairs": 107,
+            "proposed_reused_pairs": 248,
+            "reuse_fraction": 0.6888888888888889,
+            "missed_flip_pairs": 6,
+            "miss_fraction_given_reference_flip": 0.056074766355140186,
+            "missed_flip_mass_sum": 2.640625,
+            "source_model_missed_reference_flip_fraction": 0.9345794392523364,
+            "clopper_pearson_95pct_upper_miss_fraction": 0.10767195607675922
+          },
+          "screen_is_verified_physical_certificate": false
+        },
+        "model_rollout_effort_proxy": {
+          "description": "Per-scene SOURCE REACTOR rollout calls, NOT measured wall-clock latency",
+          "source_candidate_recomputes_per_scene": 3,
+          "source_rollouts_per_candidate": 8,
+          "anchor_reuse_recomputes_per_scene": 1,
+          "single_anchor_rollouts_per_scene": 8,
+          "source_rollout_reduction_fraction": 0.6666666666666666,
+          "scope": "Counting only: real inference, graph-head and fallback costs not measured"
+        },
+        "scientific_interpretation": [
+          "An anchor-copy gain does not establish the delayed graph is helpful: compare anchor_full",
+          "An event-feature claim requires full vs no_events at matched capacity",
+          "WOMD history is observational and does not identify ego-action counterfactuals",
+          "Scene-wise bootstrap is not proof of external-model generalization; paired dependent edges require clustered uncertainty",
+          "Native reactive closed-loop evidence and physical guard bounds are still required"
+        ]
+      }
+    },
+    "womd_initialized": {
+      "population": "WOMD observed initial conditions + non-observed synthetic reference policies",
+      "samples": {
+        "scenes": 120,
+        "matched_proxy_scenes": 15,
+        "matched_ego_safe_scenes": 0,
+        "reference_critical_pairs": 0,
+        "reference_sign_resolved_pairs_legacy_per_pair": 0,
+        "all_pair_count": 360,
+        "all_pair_reference_flip_count": 3,
+        "matched_pair_count": 45,
+        "matched_pair_reference_flip_count": 0,
+        "note": "Matched count known from 3 pairs per four-car scene, WOMD 3 pair flips all outside matched subset according to boundary report"
+      },
+      "metrics": {
+        "anchor_copy": {
+          "reference_resolved_sign_error_rate": null,
+          "near_boundary_pair_risk_mae": 0.6578947368421053,
+          "downstream_union_reference_risk_mae": 0.08880208333333334,
+          "matched_ego_safe_safety_ranking_regret": null
+        },
+        "source": {
+          "reference_resolved_sign_error_rate": null,
+          "near_boundary_pair_risk_mae": 0.6820175438596491,
+          "downstream_union_reference_risk_mae": 0.09262152777777778,
+          "matched_ego_safe_safety_ranking_regret": null
+        },
+        "anchor_full": {
+          "reference_resolved_sign_error_rate": null,
+          "near_boundary_pair_risk_mae": 0.022912045398919376,
+          "downstream_union_reference_risk_mae": 0.005074329847320596,
+          "matched_ego_safe_safety_ranking_regret": null
+        },
+        "anchor_graph": {
+          "reference_resolved_sign_error_rate": null,
+          "near_boundary_pair_risk_mae": 0.0019226297754398834,
+          "downstream_union_reference_risk_mae": 0.004158344771404608,
+          "matched_ego_safe_safety_ranking_regret": null
+        },
+        "full": {
+          "reference_resolved_sign_error_rate": null,
+          "near_boundary_pair_risk_mae": 0.01932387058412495,
+          "downstream_union_reference_risk_mae": 0.004493803762330664,
+          "matched_ego_safe_safety_ranking_regret": null
+        },
+        "no_events": {
+          "reference_resolved_sign_error_rate": null,
+          "near_boundary_pair_risk_mae": 0.03653956109373531,
+          "downstream_union_reference_risk_mae": 0.007226208869825718,
+          "matched_ego_safe_safety_ranking_regret": null
+        }
+      },
+      "event_vs_no_events_paired_scene_bootstrap": {
+        "pair_reference_risk_mae": {
+          "delta_method_minus_source": -0.0008860303709509485,
+          "bootstrap_95pct_ci": [
+            -0.0028892929501035526,
+            0.00012063740600943507
+          ],
+          "resamples_valid": 1000
+        },
+        "downstream_union_reference_risk_mae": {
+          "delta_method_minus_source": -0.002660932429286707,
+          "bootstrap_95pct_ci": [
+            -0.008670051667576558,
+            0.00035914745338603914
+          ],
+          "resamples_valid": 1000
+        }
+      },
+      "boundary_screen": {
+        "pair_comparisons": 45,
+        "reference_contact_flip_pairs": 0,
+        "proposed_reused_pairs": 0,
+        "reuse_fraction": 0.0,
+        "missed_flip_pairs": 0,
+        "miss_fraction_given_reference_flip": null,
+        "missed_flip_mass_sum": 0.0,
+        "source_model_missed_reference_flip_fraction": null,
+        "clopper_pearson_95pct_upper_miss_fraction": null
+      },
+      "corrected_gate": {
+        "verdict": "INSUFFICIENT_REFERENCE_EVIDENCE",
+        "novelty_verdict": "NOT_TESTABLE_WITH_CURRENT_EVIDENCE",
+        "protocol": "CBC_V3_ABLATION_AND_EVIDENCE_ADEQUACY",
+        "evidence_gaps": [
+          "KINEMATIC_MANEUVERS_MATCHED_BELOW_DECLARED_MINIMUM",
+          "REFERENCE_RESOLVED_CRITICAL_PAIRS_BELOW_DECLARED_MINIMUM",
+          "NO_HELDOUT_CONTACT_FLIP_PAIRS_FOR_SCREEN_EVALUATION",
+          "NO_DEVELOPMENT_SUPPORT_FOR_EMPIRICAL_REUSE_SCREEN"
+        ],
+        "declared_thresholds": {
+          "heldout_scenes": 100,
+          "kinematic_matched_scenes": 50,
+          "reference_resolved_critical_pairs": 30,
+          "reference_worlds": 128
+        },
+        "observed_sample": {
+          "heldout_scenes": 120,
+          "kinematic_matched_scenes": 15,
+          "reference_resolved_critical_pairs": 0,
+          "reference_worlds_per_action": 192,
+          "reference_matched_contact_flip_pairs": null,
+          "reference_all_contact_flip_pairs": null,
+          "reference_all_pair_comparisons": null,
+          "reference_matched_pair_comparisons": null,
+          "matched_ego_safe_scenes": 0,
+          "match_failure_codes": null,
+          "reference_scene_familywise_resolved_critical_n": null
+        },
+        "method_comparison": {
+          "anchor_copy": {
+            "resolved_critical_sign_error_rate": null,
+            "all_critical_underresolution_rate": null,
+            "near_boundary_pair_risk_mae": 0.6578947368421053,
+            "union_risk_mae": 0.08880208333333334,
+            "matched_pair_ranking_regret": null
+          },
+          "source": {
+            "resolved_critical_sign_error_rate": null,
+            "all_critical_underresolution_rate": null,
+            "near_boundary_pair_risk_mae": 0.6820175438596491,
+            "union_risk_mae": 0.09262152777777778,
+            "matched_pair_ranking_regret": null
+          },
+          "full": {
+            "resolved_critical_sign_error_rate": null,
+            "all_critical_underresolution_rate": null,
+            "near_boundary_pair_risk_mae": 0.01932387058412495,
+            "union_risk_mae": 0.004493803762330664,
+            "matched_pair_ranking_regret": null
+          },
+          "no_events": {
+            "resolved_critical_sign_error_rate": null,
+            "all_critical_underresolution_rate": null,
+            "near_boundary_pair_risk_mae": 0.03653956109373531,
+            "union_risk_mae": 0.007226208869825718,
+            "matched_pair_ranking_regret": null
+          },
+          "anchor_full": {
+            "resolved_critical_sign_error_rate": null,
+            "all_critical_underresolution_rate": null,
+            "near_boundary_pair_risk_mae": 0.022912045398919376,
+            "union_risk_mae": 0.005074329847320596,
+            "matched_pair_ranking_regret": null
+          },
+          "anchor_graph": {
+            "resolved_critical_sign_error_rate": null,
+            "all_critical_underresolution_rate": null,
+            "near_boundary_pair_risk_mae": 0.0019226297754398834,
+            "union_risk_mae": 0.004158344771404608,
+            "matched_pair_ranking_regret": null
+          }
+        },
+        "incremental_ablation": {
+          "anchor_graph_minus_anchor_copy": {
+            "status": "NOT_MEASURED",
+            "delta": null,
+            "paired_scene_ci95": null
+          },
+          "anchor_graph_minus_equal_anchor_budget_without_graph": {
+            "status": "NOT_MEASURED",
+            "delta": null,
+            "paired_scene_ci95": null
+          },
+          "full_minus_equal_full_source_budget_no_events": {
+            "status": "NOT_MEASURED",
+            "delta": null,
+            "paired_scene_ci95": null
+          },
+          "graph_strictly_better_than_anchor_full_point_estimate": false,
+          "full_strictly_better_than_no_events_point_estimate": false
+        },
+        "empirical_boundary_screen": {
+          "status": "NO_SUPPORTED_EMPIRICAL_REUSE_RULE",
+          "heldout": {
+            "pair_comparisons": 45,
+            "reference_contact_flip_pairs": 0,
+            "proposed_reused_pairs": 0,
+            "reuse_fraction": 0.0,
+            "missed_flip_pairs": 0,
+            "miss_fraction_given_reference_flip": null,
+            "missed_flip_mass_sum": 0.0,
+            "source_model_missed_reference_flip_fraction": null,
+            "clopper_pearson_95pct_upper_miss_fraction": null
+          },
+          "screen_is_verified_physical_certificate": false
+        },
+        "model_rollout_effort_proxy": {
+          "description": "Per-scene SOURCE REACTOR rollout calls, NOT measured wall-clock latency",
+          "source_candidate_recomputes_per_scene": 3,
+          "source_rollouts_per_candidate": 8,
+          "anchor_reuse_recomputes_per_scene": 1,
+          "single_anchor_rollouts_per_scene": 8,
+          "source_rollout_reduction_fraction": 0.6666666666666666,
+          "scope": "Counting only: real inference, graph-head and fallback costs not measured"
+        },
+        "scientific_interpretation": [
+          "An anchor-copy gain does not establish the delayed graph is helpful: compare anchor_full",
+          "An event-feature claim requires full vs no_events at matched capacity",
+          "WOMD history is observational and does not identify ego-action counterfactuals",
+          "Scene-wise bootstrap is not proof of external-model generalization; paired dependent edges require clustered uncertainty",
+          "Native reactive closed-loop evidence and physical guard bounds are still required"
+        ]
+      }
+    }
+  }
+}

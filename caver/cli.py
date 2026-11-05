@@ -32,13 +32,13 @@ def parser():
     s=sub.add_parser('nuplan-check');s.add_argument('--split');s.add_argument('--db',help='Optional one DB strict schema audit');s.add_argument('--output')
     s=sub.add_parser('nuplan-export');s.add_argument('--db',required=True);s.add_argument('--map-root');s.add_argument('--limit',type=int,default=10);s.add_argument('--output',required=True)
     s=sub.add_parser('reactsim-check');s.add_argument('--export',help='Optional verified official simulator JSONL export');s.add_argument('--output')
-    s=sub.add_parser('train-policy');s.add_argument('--input');s.add_argument('--womd-train-partition',action='store_true',help='Do not fit observational reactor on frozen calibration scenarios');s.add_argument('--limit',type=int,default=3000);s.add_argument('--epochs',type=int,default=15);s.add_argument('--output',required=True)
+    s=sub.add_parser('train-policy');s.add_argument('--input');s.add_argument('--womd-train-partition',action='store_true',help='Do not fit observational reactor on frozen calibration scenarios');s.add_argument('--limit',type=int,default=3000);s.add_argument('--epochs',type=int,default=15);s.add_argument('--device',default='auto');s.add_argument('--output',required=True)
     s=sub.add_parser('fourcar');s.add_argument('--out',required=True);s.add_argument('--seed',type=int,default=10);s.add_argument('--worlds',type=int,default=4)
     s=sub.add_parser('fourcar-challenge');s.add_argument('--config',default='configs/fourcar_challenge.json');s.add_argument('--output',required=True)
     s=sub.add_parser('fourcar-mediation');s.add_argument('--out',required=True);s.add_argument('--seed',type=int,default=10);s.add_argument('--world-seed',type=int,default=10);s.add_argument('--family',default='late_brake')
     s=sub.add_parser('fourcar-scan');s.add_argument('--out',required=True);s.add_argument('--scenes',type=int,default=100);s.add_argument('--worlds',type=int,default=3);s.add_argument('--seed',type=int,default=100)
-    s=sub.add_parser('collect');s.add_argument('--source',choices=['synthetic','synthetic-stress','womd-jsonl','nuplan-jsonl'],default='synthetic');s.add_argument('--input');s.add_argument('--split',choices=['train','calibration','test'],required=True);s.add_argument('--scenes',type=int,default=20);s.add_argument('--source-worlds',type=int,default=4);s.add_argument('--audit-worlds',type=int,default=16);s.add_argument('--checkpoint');s.add_argument('--source-family',choices=['delayed_idm','learned_logged','stress_source'],default='delayed_idm');s.add_argument('--policy-checkpoint');s.add_argument('--output',required=True)
-    s=sub.add_parser('train-cbc');s.add_argument('--input',required=True);s.add_argument('--variant',choices=['full','no_events','graph','anchor_full','anchor_graph'],default='full');s.add_argument('--epochs',type=int,default=80);s.add_argument('--output',required=True)
+    s=sub.add_parser('collect');s.add_argument('--source',choices=['synthetic','synthetic-stress','womd-jsonl','nuplan-jsonl'],default='synthetic');s.add_argument('--input');s.add_argument('--split',choices=['train','calibration','test'],required=True);s.add_argument('--scenes',type=int,default=20);s.add_argument('--source-worlds',type=int,default=4);s.add_argument('--audit-worlds',type=int,default=16);s.add_argument('--checkpoint');s.add_argument('--source-family',choices=['delayed_idm','learned_logged','stress_source'],default='delayed_idm');s.add_argument('--policy-checkpoint');s.add_argument('--candidate-policy',choices=['fixed','observed-adaptive'],default='fixed');s.add_argument('--output',required=True)
+    s=sub.add_parser('train-cbc');s.add_argument('--input',required=True);s.add_argument('--variant',choices=['full','no_events','graph','anchor_full','anchor_graph'],default='full');s.add_argument('--epochs',type=int,default=80);s.add_argument('--device',default='auto');s.add_argument('--contrast-weight',type=float,default=0.);s.add_argument('--output',required=True)
     s=sub.add_parser('cbc-study',help='Compact held-out CBC baseline/ablation comparison')
     s.add_argument('--input',required=True)
     s.add_argument('--model',action='append',default=[],help='label=checkpoint.pt; repeat')
@@ -136,7 +136,7 @@ def run(args):
                         raise ValueError('Observed policy partition requires official WOMD training')
                     if training_partition(sc)=='train':yield sc
             scenes=stream()
-        report(fit_logged_model(scenes,args.output,epochs=args.epochs))
+        report(fit_logged_model(scenes,args.output,epochs=args.epochs,device=args.device))
     elif args.cmd=='fourcar':
         from caver.experiment import single_demo
         report(single_demo(args.out,args.seed,args.worlds))
@@ -226,19 +226,29 @@ def run(args):
             raise ValueError('Synthetic stress requires a named non-logged surrogate source family')
         audit_families=(('stress_reference','stress_shifted') if args.source=='synthetic-stress'
                         else ('late_brake','conservative'))
-        rec=[paired_scene(sc,actions=stress_actions() if args.source=='synthetic-stress' else None,
-                          source_family=args.source_family,source_worlds=args.source_worlds,
-                          audit_families=audit_families,audit_worlds=args.audit_worlds,
-                          seed=seeds[args.split]+i*73,model=model,source_policy=policy)
-             for i,sc in enumerate(scenes)]
-        for row in rec:row['experimental_split']=args.split
+        if args.candidate_policy=='observed-adaptive' and args.source not in ('womd-jsonl','nuplan-jsonl'):
+            raise ValueError('Observed-adaptive candidate control policy is for observation-first corridor experiments')
+        rec=[]
+        for i,sc in enumerate(scenes):
+            actions=(stress_actions() if args.source=='synthetic-stress' else None)
+            candidate_meta={'policy':'FIXED_TEMPLATE_V1','map_law_route_feasibility':'UNVERIFIED'}
+            if args.candidate_policy=='observed-adaptive':
+                from caver.models.candidate_policy import choose_observation_only_actions
+                actions,candidate_meta=choose_observation_only_actions(sc)
+            row=paired_scene(sc,actions=actions,
+                    source_family=args.source_family,source_worlds=args.source_worlds,
+                    audit_families=audit_families,audit_worlds=args.audit_worlds,
+                    seed=seeds[args.split]+i*73,model=model,source_policy=policy)
+            row['experimental_split']=args.split
+            row['candidate_selection_audit']=candidate_meta
+            rec.append(row)
         store_records(rec,args.output)
         report({'split':args.split,'records':len(rec),'output':args.output,
                 'reference_families':list(audit_families),
-                'reference_type':'SIMULATED_NOT_REAL_CAUSAL_LABEL',**stats})
+                'reference_type':'SIMULATED_NOT_REAL_CAUSAL_LABEL','candidate_policy':args.candidate_policy,**stats})
     elif args.cmd=='train-cbc':
         from caver.experiment import fit_cbc,read_records
-        report(fit_cbc(list(read_records(args.input)),args.output,epochs=args.epochs,variant=args.variant))
+        report(fit_cbc(list(read_records(args.input)),args.output,epochs=args.epochs,variant=args.variant,device=args.device,contrast_weight=args.contrast_weight))
     elif args.cmd=='cbc-study':
         from caver.validation.cbc_study import study
         files={}

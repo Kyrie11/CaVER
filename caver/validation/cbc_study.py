@@ -28,10 +28,20 @@ def _score_prediction(row, predicted, threshold, detection):
                 'pair_errors_far':[],'risk_reversal':False,'ego_safe':False}
     match=row.get('candidate_matching',{}).get('pairs',{}).get('early|late',{})
     eligible=bool(match.get('matched_kinematic_proxy',False))
+    failures=[]
+    if not match.get('same_maneuver_intent',False):failures.append('INTENT_MISMATCH')
+    if float(match.get('d_e',float('inf')))>float(match.get('delta_e_max',0.)):failures.append('EGO_TRAJECTORY_DISTANCE')
+    if float(match.get('task_cost_difference',float('inf')))>float(match.get('delta_J_max',0.)):failures.append('TASK_COMFORT_MISMATCH')
+    if not match.get('kinematic_feasible_both',False):failures.append('EGO_DYNAMICS')
+    if not failures and not eligible:failures.append('UNKNOWN_MATCH_FAILURE')
     n=len(row.get('audit_families',[]))*int(row.get('audit_worlds_per_family',0))
     # Paired binary differences in [-1,+1]. Hoeffding bound on the reference
     # sample difference (not a CI for a real driver population).
     radius=math.sqrt(2*math.log(40.)/n) if n>0 else math.inf
+    # A separate, conservative within-scene Bonferroni/Hoeffding bound is
+    # exposed; the legacy radius is NOT a simultaneous claim over 120 scenes.
+    n_pairs=max(1,len(row['pairs']))
+    radius_scene=math.sqrt(2*math.log(2*n_pairs/.05)/n) if n>0 else math.inf
     a,b='early','late'
     ego_safe=(aud[f'{a}/ego']<=.05 and aud[f'{b}/ego']<=.05)
     risk_reversal=eligible and ego_safe and abs(aud[f'{a}/down']-aud[f'{b}/down'])>=threshold
@@ -44,7 +54,9 @@ def _score_prediction(row, predicted, threshold, detection):
                            'sign_error':float((est*true)<=0 or abs(est)<detection),
                            'underresolution':float(abs(est)<detection),
                            'reference_sign_resolved':bool(abs(true)>radius),
-                           'reference_mc_radius':radius})
+                           'reference_sign_resolved_scene_familywise':bool(abs(true)>radius_scene),
+                           'reference_mc_radius':radius,
+                           'reference_mc_radius_scene_familywise':radius_scene})
         for name in names:
             key=f'{name}/{p}'
             e=abs(float(predicted[key])-float(aud[key]))
@@ -66,7 +78,11 @@ def _score_prediction(row, predicted, threshold, detection):
         # Safety *ranking only*: not a complete task-cost planning decision.
         choice=min((a,b),key=lambda name:(predicted[f'{name}/down'],name))
         regret=float(aud[f'{choice}/down']-min(aud[f'{a}/down'],aud[f'{b}/down']))
-    return {'matched':int(eligible),'critical':events,'resolved':[x for x in events if x['reference_sign_resolved']],
+    return {'matched':int(eligible),'match_failure_codes':failures,
+            'reference_ego_risk_early':float(aud[f'{a}/ego']),
+            'reference_ego_risk_late':float(aud[f'{b}/ego']),
+            'matched_ego_safe':bool(eligible and ego_safe),
+            'critical':events,'resolved':[x for x in events if x['reference_sign_resolved']],
             'pair_errors':errors,'down_errors':down_errors,'regret':regret,
             'event':pairs,'pair_errors_near':near,'pair_errors_far':far,
             'risk_reversal':risk_reversal,'ego_safe':ego_safe}
@@ -79,7 +95,17 @@ def _aggregate(rows):
     reg=[r['regret'] for r in rows if r['regret'] is not None]
     pairs=[p for r in rows for p in r['event']]
     hits=[p for p in pairs if p['reference_contact_flip']>0]
+    matched_pairs=[p for r in rows if r['matched'] for p in r['event']]
+    familywise=[c for c in critical if c['reference_sign_resolved_scene_familywise']]
+    reasons=Counter(reason for r in rows for reason in r.get('match_failure_codes',[]))
     return {'scenes':len(rows),'matched_kinematic_proxy_scenes':sum(r['matched'] for r in rows),
+        'match_failure_codes':dict(reasons),
+        'reference_any_pair_contact_flip_all_candidates_n':len(hits),
+        'reference_all_pair_comparisons_n':len(pairs),
+        'reference_matched_pair_comparisons_n':len(matched_pairs),
+        'reference_matched_contact_flip_n':sum(p['reference_contact_flip']>0 for p in matched_pairs),
+        'reference_familywise_within_scene_resolved_critical_n':len(familywise),
+        'reference_mc_ci_familywise_scope':'within-scene pairwise only; not global-FWER across scenes',
         'matched_ego_safe_scenes':sum(int(r['matched'] and r['ego_safe']) for r in rows),
         'matched_downstream_contrast_scenes':sum(int(r['risk_reversal']) for r in rows),
         'critical_pair_tests':len(critical),'critical_pair_ref_sign_resolved':len(resolved),
@@ -175,6 +201,8 @@ def study(test_file,models,contrast=.20,detect=.05,bootstrap=500,max_examples=8)
                       for name,d in details.items() if name not in ('anchor_copy','source')}
     paired_events=(_bootstrap(details['full'],details['no_events'],n_boot=bootstrap)
                    if 'full' in details and 'no_events' in details else {})
+    paired_graph=(_bootstrap(details['anchor_graph'],details['anchor_full'],n_boot=bootstrap)
+                   if 'anchor_graph' in details and 'anchor_full' in details else {})
     # Return only bounded-size, predeclared examples. No raw trajectories,
     # no source-world tensor dump, and no train/calibration target records.
     cases=[]
@@ -197,6 +225,7 @@ def study(test_file,models,contrast=.20,detect=.05,bootstrap=500,max_examples=8)
             'methods':aggregates,'paired_scene_bootstrap_method_minus_source':paired,
             'paired_scene_bootstrap_method_minus_anchor_copy':paired_vs_anchor,
             'paired_scene_bootstrap_full_minus_no_events':paired_events,
+            'paired_scene_bootstrap_anchor_graph_minus_anchor_full':paired_graph,
             'source_worlds_per_candidate':records[0].get('source_worlds'),
             'reference_worlds_per_candidate':len(records[0]['audit_families'])*int(records[0]['audit_worlds_per_family']),
             'checkpoints':checksums,'interesting_test_cases_bounded':cases,

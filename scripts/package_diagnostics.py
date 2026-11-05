@@ -16,7 +16,10 @@ REPORT_NAMES={
     'womd_training_check.json','womd_validation_check.json','doctor.json',
     'nuplan_inventory.json','reactsim_inventory.json',
     'carla_check.json','carla_summary.json','pytest_summary.txt',
-    'calibration.json','evaluation.json','cbc_summary_table.md','cbc_summary_table.csv'
+    'calibration.json','evaluation.json','cbc_summary_table.md','cbc_summary_table.csv',
+    'synthetic_cbc_gate_v3.json','womd_cbc_gate_v3.json',
+    'train_womd_context_v3.json','test_womd_context_v3.json',
+    'train_candidate_design_v3.json','test_candidate_design_v3.json'
 }
 
 

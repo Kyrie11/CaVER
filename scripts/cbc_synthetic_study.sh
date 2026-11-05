@@ -28,6 +28,10 @@ python -m caver.cli collect --source synthetic-stress --split train --scenes "$T
 python -m caver.cli collect --source synthetic-stress --split test --scenes "$TEST_SCENES" \
     --source-worlds "$SOURCE_WORLDS" --audit-worlds "$AUDIT_WORLDS" \
     --source-family stress_source --output "$OUT/test_records.jsonl.gz"
+if [[ "${RECORDS_ONLY:-0}" == "1" ]];then
+  echo "Synthetic records-only finished: $OUT/{train,test}_records.jsonl.gz"
+  exit 0
+fi
 for v in full no_events anchor_full;do
   python -m caver.cli train-cbc --input "$OUT/train_records.jsonl.gz" --variant "$v" \
     --epochs "$CBC_EPOCHS" --output "$OUT/cbc_${v}.pt"

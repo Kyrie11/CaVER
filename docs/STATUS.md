@@ -44,3 +44,12 @@ This checklist distinguishes an implemented/runnable component from an externall
 ## RIDE reuse / exclusion
 
 Audited `ride/geometry.py` inspired the OBB separating-axis geometry; the new functions and collision semantics are in `caver/sim/geometry.py`. RIDE's read-only ReactSim token auditing motivated `caver/integrations/reactsim_tokens.py`. We did **not** copy the known exploratory brake-command-only lag controller or the RIDE historical v-series scripts. The uploaded RIDE archive has no `ride/fourcar/` package, no `scripts/48_fourcar_mechanism.sh` and no matching frozen config files. Instead the `configs/fourcar_challenge.json` is a separately searched and identified synthetic fixture, with a new, openly identified result.
+
+
+## CBC v3 evidence gate (2026-11-05)
+
+- Synthetic matched action cascade existence is supported only inside the specified stress reactor family; new incremental graph/event novelty is not supported by the uploaded held-out pair-ranking results.
+- The WOMD-initialized study has zero matched-and-both-ego-safe examples; it cannot evaluate critical ranking. 3 reference contact flips belong to ALL 360 pair comparisons, none to matched 45.
+- No actual user 2-GPU CUDA validation, certified hybrid guard tube, naturalistic off-log intervention truth, or official Waymax/ReactSim reactive rollout has been performed.
+- v3 adds contrastive training and observation-only candidate studies as **new falsification controls**, not accepted algorithmic improvements.
+- Reader: docs/CBC_V3_RUNBOOK_CN.md; docs/CBC_V3_EVIDENCE_AUDIT_CN.md.

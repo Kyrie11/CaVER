@@ -203,8 +203,13 @@ def paired_scene(scene,actions=None,source_family='delayed_idm',audit_families=(
         record['anchor_view']=build_anchor_view(record,'early')
     return record
 
-def fit_cbc(records,output,epochs=75,seed=11,variant='full'):
+def fit_cbc(records,output,epochs=75,seed=11,variant='full',device='auto',contrast_weight=0.):
     torch.manual_seed(seed)
+    if device=='auto':device='cuda:0' if torch.cuda.is_available() else 'cpu'
+    if str(device).startswith('cuda') and not torch.cuda.is_available():
+        raise ValueError('CUDA requested but torch.cuda.is_available() is false; install an appropriate CUDA PyTorch wheel')
+    dev=torch.device(device)
+    if contrast_weight<0:raise ValueError('contrast_weight must be nonnegative')
     records=list(records)
     if any(r.get('experimental_split') not in ('train',None) for r in records):
         raise ValueError('CBC train data must not contain calibration/test rollouts')
@@ -225,11 +230,12 @@ def fit_cbc(records,output,epochs=75,seed=11,variant='full'):
             X.append(row['anchor_view']['candidate_features'][k] if uses_anchor else v['features'])
             Y.append(v['target'])
     if len(X)<6 or len(scene_groups)<2:raise ValueError('Need >=6 pairs and >=2 joint candidate labels')
-    X=torch.tensor(np.array(X,np.float32));Y=torch.tensor(np.array(Y,np.float32))
+    X=torch.tensor(np.array(X,np.float32),device=dev);Y=torch.tensor(np.array(Y,np.float32),device=dev)
     m=CascadeRiskHead(variant=variant);m.joint=JointRiskHead(suppress_events=(variant=='no_events'))
     if uses_graph:
         from caver.models.temporal import GraphCascadeRiskHead
         m.graph_model=GraphCascadeRiskHead(len(FEATURES))
+    m=m.to(dev)
     opt=torch.optim.AdamW(m.parameters(),lr=1e-3,weight_decay=1e-4)
     graph_groups=[]
     if uses_graph:
@@ -250,6 +256,7 @@ def fit_cbc(records,output,epochs=75,seed=11,variant='full'):
         if uses_graph:
             for idx in torch.randperm(len(graph_groups)).tolist():
                 feat,y,joint,trace,pairs=graph_groups[idx]
+                feat=feat.to(dev);y=y.to(dev);joint=joint.to(dev)
                 pair_pred=m.graph_model(feat,trace,pairs)
                 joint_pred=m.joint(feat)
                 loss=training_loss(pair_pred,y)+torch.nn.functional.binary_cross_entropy(
@@ -264,18 +271,54 @@ def fit_cbc(records,output,epochs=75,seed=11,variant='full'):
             # Joint events are supervised from complete independent rollouts.
             for sidx in groups:
                 feat,y=scene_groups[sidx]
+                feat=feat.to(dev);y=y.to(dev)
                 output_joint=m.joint(feat)
                 loss_joint=torch.nn.functional.binary_cross_entropy(output_joint.clamp(1e-6,1-1e-6),y)
                 opt.zero_grad();loss_joint.backward()
                 torch.nn.utils.clip_grad_norm_(m.parameters(),3.);opt.step()
                 losses.append(float(loss_joint.detach()))
+        # Optional action-contrastive objective. Reference outcomes appear ONLY
+        # in training supervision, never as candidate-selection or test inputs.
+        # The same pre-outcome matching mask is used for every model variant.
+        if contrast_weight>0:
+            for row in records:
+                matching=row.get('candidate_matching',{}).get('pairs',{}).get('early|late',{})
+                if not matching.get('matched_kinematic_proxy',False):continue
+                pair_ids=row['pairs'];deltas=[]
+                for act in ('early','late'):
+                    feat=torch.tensor(np.asarray([
+                        (row['anchor_view']['candidate_features'][f'{act}/{pair}'] if uses_anchor
+                        else row['diagnostics'][f'{act}/{pair}']['features']) for pair in pair_ids],np.float32),device=dev)
+                    if uses_graph:
+                        tr=(row['anchor_view']['candidate_temporal'][act] if uses_anchor
+                            else row['temporal'][act])
+                        risk=m.graph_model(feat,tr,pair_ids)[:,0]
+                    else:
+                        risk=m(feat)[:,0]
+                    deltas.append(risk)
+                estimate=deltas[0]-deltas[1]
+                target=torch.tensor([row['audited']['early/'+p]-row['audited']['late/'+p]
+                                     for p in pair_ids],dtype=torch.float32,device=dev)
+                # Regression is defined even for zero-contrast cases. For
+                # substantial reference differences, add a smooth ranking term.
+                reg=torch.nn.functional.smooth_l1_loss(estimate,target,beta=.15)
+                active=(torch.abs(target)>=.1).float()
+                margin=(torch.nn.functional.softplus(.04-
+                        torch.sign(target)*estimate)*active).sum()/active.sum().clamp_min(1.)
+                loss_ctr=contrast_weight*(reg+.1*margin)
+                opt.zero_grad();loss_ctr.backward()
+                torch.nn.utils.clip_grad_norm_(m.parameters(),3.);opt.step()
+                losses.append(float(loss_ctr.detach()))
+    m=m.to('cpu')
     save(m,output,{'training_scenes':len(records),'example_count':len(X),'joint_examples':len(scene_groups),
                    'train_source':'simulator_reference','variant':variant,'seed':seed,'slack_masked':True,
+                   'training_device':str(dev),'contrast_weight':contrast_weight,
                    'prediction_source':'ONE_ANCHOR_REUSE' if uses_anchor else 'FULL_CANDIDATE_CONDITIONED_SOURCE',
                    'training_scene_sha256':[sha256(r['scene_id'].encode()).hexdigest() for r in records],
                    'training_group_sha256':[sha256(str(r.get('scene',{}).get('provenance',{}).get('overlap_group',r['scene_id'])).encode()).hexdigest() for r in records]})
     return {'output':str(output),'train_scenes':len(records),'pairs':len(X),
-            'joint_examples':len(scene_groups),'variant':variant,'loss':float(np.mean(losses))}
+            'joint_examples':len(scene_groups),'variant':variant,'loss':float(np.mean(losses)),
+            'training_device':str(dev),'contrast_weight':contrast_weight}
 
 def record_with_new_predictions(row,model):
     uses_anchor=getattr(model,'variant','').startswith('anchor_')

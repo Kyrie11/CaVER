@@ -43,7 +43,7 @@ for entry in "train training $TRAIN_SCENES 17" "calibration training $CAL_SCENES
     --output "$OUT/womd_${partition}_corridor.jsonl.gz" >/dev/null
 done
 python -m caver.cli train-policy --input "$OUT/womd_policy_train.jsonl.gz" \
- --womd-train-partition --limit "$POLICY_SCENES" --epochs 12 --output "$OUT/policy_observed.pt"
+ --womd-train-partition --limit "$POLICY_SCENES" --epochs 12 --device "${POLICY_DEVICE:-auto}" --output "$OUT/policy_observed.pt"
 for partition in train calibration test;do
    n="$TRAIN_SCENES"; [[ "$partition" == calibration ]] && n="$CAL_SCENES"
    [[ "$partition" == test ]] && n="$TEST_SCENES"
@@ -56,6 +56,11 @@ done
 python -m caver.cli audit-splits --train "$OUT/train_records.jsonl.gz" \
  --calibration "$OUT/calibration_records.jsonl.gz" --test "$OUT/test_records.jsonl.gz" \
  --output "$OUT/split_audit.json" >/dev/null
+if [[ "${RECORDS_ONLY:-0}" == "1" ]];then
+  echo "WOMD records-only finished: $OUT/{train,calibration,test}_records.jsonl.gz"
+  echo "Run scripts/cbc_train_dual_gpu.sh with the three records files (train/test/out/calibration)"
+  exit 0
+fi
 for v in full no_events anchor_full;do
   python -m caver.cli train-cbc --input "$OUT/train_records.jsonl.gz" --variant "$v" \
     --epochs "$CBC_EPOCHS" --output "$OUT/cbc_${v}.pt"

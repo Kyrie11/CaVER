@@ -1,3 +1,16 @@
+# CaVER CBC-first v3 — evidence-gated reproduction (2026-11-05)
+
+**Read first:** [`docs/CBC_V3_RUNBOOK_CN.md`](docs/CBC_V3_RUNBOOK_CN.md) (all commands), [`docs/CBC_V3_EVIDENCE_AUDIT_CN.md`](docs/CBC_V3_EVIDENCE_AUDIT_CN.md) (science verdict), [`paper/interactive_planning_CBC_revised.tex`](paper/interactive_planning_CBC_revised.tex) (conservative paper edits). This version was reanalyzed against the user's uploaded `CaVER_CBC_report_bundle.zip`.
+
+- Uploaded synthetic: same-anchor graph **did not beat** same-anchor no-graph control on critical pair sign error (31.25% vs 21.875%); explicit events **did not beat** no-events control (6.25% each). Original graph-vs-anchor-copy positive comparisons are insufficient for novelty. One-source-anchor recall is simulator-conditional, not a physical guarantee.
+- Uploaded WOMD initialization: 120 held-out scenes, 15 kinematically matched, **0 matched-and-both-ego-safe**; 3 pair contact flips among **all 360**, zero among **matched 45**. No legitimate WOMD CBC safety ranking conclusion.
+- **Added in v3:** observation-only BC headway/braking audit, observation-only adaptive candidate prescreen, map coordinate preservation, bounded CBC scientific gate, contrastive pair training ablation, dual-CUDA-GPU training orchestrator, records-only WOMD/Synthetic mode, compact report bundles.
+- **Validation:** local CPU PyTorch unit tests (60 passed). Official Waymax/ReactSim/CARLA counterfactual closed-loop evidence, validated physical guard envelopes and hardware-CUDA speed remain unverified.
+
+Start with `OUT=outputs/cbc_phase0_v3 bash scripts/cbc_phase0_review.sh` if earlier server results exist. For GPU ablations use `scripts/cbc_train_dual_gpu.sh` after `RECORDS_ONLY=1` data collection. **Do not immediately jointly train CBC/DSE/TIV** while critical-pair evidence is inadequate.
+
+---
+
 # CaVER — CBC-first v2 research harness (2026-11-05)
 
 **Start here: [`docs/CBC_FIRST_RUN_CN.md`](docs/CBC_FIRST_RUN_CN.md)** — 中文详尽指令，CARLA 独立 RPC 检查、WOMD 限额压缩导出、CBC 同意图边界风险排序消融、报告打包与真实物理/统计证据缺口。

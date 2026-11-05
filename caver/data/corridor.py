@@ -48,7 +48,42 @@ def corridor_subset(sc):
                 normalized.append(replace(agent,agent_id=ident,y=agent.y*sign,vy=agent.vy*sign,
                                           yaw=agent.yaw*sign,history=history))
             chosen=normalized
+            # Preserve map evidence and <=t0 signal observations in the same
+            # normalized frame, instead of silently dropping lawful-road
+            # context. These polylines alone do NOT certify lane connectivity.
+            local_map=None
+            if sc.map_data is not None:
+                # Every coordinate-bearing map entry must share the local
+                # frame; copying tf.Example samples unchanged would mix global
+                # coordinates with normalized actors (a silent planning bug).
+                local_map={k:v for k,v in sc.map_data.items()
+                           if k not in ('polylines','samples')}
+                samples=[]
+                for sample in sc.map_data.get('samples',[]):
+                    if 'xy' not in sample:continue
+                    wx,wy=map(float,sample['xy'])
+                    dx,dy=wx-ego.x,wy-ego.y
+                    lx=dx*cy+dy*sy
+                    ly=(-dx*sy+dy*cy)*sign
+                    if -100.<=lx<=110. and abs(ly)<=30.:
+                        samples.append({**sample,'xy':[lx,ly]})
+                if 'samples' in sc.map_data:local_map['samples']=samples
+                cropped=[]
+                for line in sc.map_data.get('polylines',[]):
+                    points=[]
+                    for x,y in line.get('xy',[]):
+                        xx,yy=float(x)-ego.x,float(y)-ego.y
+                        lx=xx*cy+yy*sy
+                        ly=(-xx*sy+yy*cy)*sign
+                        if -100.<=lx<=110. and abs(ly)<=30.:
+                            points.append([lx,ly])
+                    if points:
+                        cropped.append({**line,'xy':points})
+                local_map['polylines']=cropped
+                local_map['frame']='EGO_CURRENT_HEADING_LOCAL_REFLECTED'
+                local_map['note']='Observation-visible map only; connection/traffic-law validity unverified'
             return Scene(sc.scene_id,sc.source+'_CORRIDOR_FILTER',sc.dt,'E',chosen,
                          {**sc.provenance,'original_roles':{'E':sc.ego_id,'A':A.agent_id,'B':B.agent_id,'C':C.agent_id},
-                          'corridor_filter':'GEOMETRIC_NOT_MAP_CERTIFIED','action_target_lane':3.5}).validate(),None
+                          'corridor_filter':'GEOMETRIC_NOT_MAP_CERTIFIED','action_target_lane':3.5,
+                          'map_preserved':bool(local_map and (local_map.get('polylines') or local_map.get('samples')))},local_map).validate(),None
     return None,'NO_ELIGIBLE_ADJACENT_CHAIN'

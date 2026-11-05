@@ -43,8 +43,12 @@ def history_rows(scene):
                          np.float32(np.clip(val,-10,5))))
     return rows
 
-def fit_logged_model(scenes,output,epochs=10,batch=2048,lr=1e-3,max_rows=250000,seed=7):
+def fit_logged_model(scenes,output,epochs=10,batch=2048,lr=1e-3,max_rows=250000,seed=7,device='auto'):
     rng=np.random.default_rng(seed)
+    if device=='auto':device='cuda:0' if torch.cuda.is_available() else 'cpu'
+    if str(device).startswith('cuda') and not torch.cuda.is_available():
+        raise ValueError('CUDA requested but unavailable; install a CUDA-enabled PyTorch wheel')
+    dev=torch.device(device)
     samples=[]
     for scene in scenes:
         samples.extend(history_rows(scene))
@@ -52,15 +56,17 @@ def fit_logged_model(scenes,output,epochs=10,batch=2048,lr=1e-3,max_rows=250000,
     if len(samples)<20:raise ValueError('Need >=20 valid logged history samples; current scenes have insufficient 10Hz history')
     if len(samples)>max_rows:samples=[samples[i] for i in rng.choice(len(samples),size=max_rows,replace=False)]
     X=torch.tensor(np.stack([r[0] for r in samples]));Y=torch.tensor(np.array([r[1] for r in samples]))
-    m=LoggedPolicyHead();opt=torch.optim.Adam(m.parameters(),lr=lr)
+    X=X.to(dev);Y=Y.to(dev)
+    m=LoggedPolicyHead().to(dev);opt=torch.optim.Adam(m.parameters(),lr=lr)
     for ep in range(epochs):
         perm=torch.randperm(len(X));losses=[]
         for ids in perm.split(batch):
             loss=torch.nn.functional.smooth_l1_loss(m(X[ids]),Y[ids]);opt.zero_grad();loss.backward();opt.step()
             losses.append(loss.item())
+    m=m.to('cpu')
     Path(output).parent.mkdir(parents=True,exist_ok=True)
     torch.save({'weights':m.state_dict(),'model':'LOGGED_OBSERVATIONAL_POLICY','samples':len(samples)},output)
-    return {'samples':len(samples),'training_loss':float(np.mean(losses)),'claim':'observational acceleration only; not an ego-conditioned world model'}
+    return {'samples':len(samples),'training_loss':float(np.mean(losses)),'claim':'observational acceleration only; not an ego-conditioned world model','training_device':str(dev)}
 
 
 def load_logged_policy(path):
