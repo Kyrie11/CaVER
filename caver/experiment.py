@@ -223,7 +223,13 @@ def paired_scene(scene,actions=None,source_family='delayed_idm',audit_families=(
         'source_rollout_calls':int(source_calls),
         'reference_rollout_calls':int(reference_calls),
         'candidate_count':len(actions),
+        'planning_candidate_count':sum(1 for a in actions if a.action_id!='reference'),
+        'reference_baseline_count':sum(1 for a in actions if a.action_id=='reference'),
         'source_recompute_calls':len(actions),
+        'planning_source_recompute_calls':sum(1 for a in actions if a.action_id!='reference'),
+        'reference_baseline_recompute_calls':sum(1 for a in actions if a.action_id=='reference'),
+        'planning_source_rollout_calls':int(source_worlds*sum(1 for a in actions if a.action_id!='reference')),
+        'reference_baseline_rollout_calls':int(source_worlds*sum(1 for a in actions if a.action_id=='reference')),
         'anchor_recompute_calls':1,
         'callback_count':None,'reused':None,'fallback':None,
     }
@@ -241,7 +247,7 @@ def fit_cbc(records,output,epochs=75,seed=11,variant='full',device='auto',contra
         raise ValueError('CBC train data must not contain calibration/test rollouts')
     X=[];Y=[];scene_groups=[]
     uses_anchor=variant.startswith('anchor_')
-    uses_graph=variant in ('graph','anchor_graph')
+    uses_graph=variant in ('graph','anchor_graph','anchor_graph_event')
     for row in records:
         pairs=row['pairs']
         if uses_anchor and 'anchor_view' not in row:
@@ -260,7 +266,7 @@ def fit_cbc(records,output,epochs=75,seed=11,variant='full',device='auto',contra
     m=CascadeRiskHead(variant=variant);m.joint=JointRiskHead(suppress_events=(variant=='no_events'))
     if uses_graph:
         from caver.models.temporal import GraphCascadeRiskHead
-        m.graph_model=GraphCascadeRiskHead(len(FEATURES))
+        m.graph_model=GraphCascadeRiskHead(len(FEATURES), event_pool=(variant=='anchor_graph_event'))
     m=m.to(dev)
     opt=torch.optim.AdamW(m.parameters(),lr=1e-3,weight_decay=1e-4)
     graph_groups=[]
@@ -362,7 +368,7 @@ def record_with_new_predictions(row,model):
         feat=[(row['anchor_view']['candidate_features'][f'{a}/{pair}'] if uses_anchor
                else row['diagnostics'][f'{a}/{pair}']['features']) for pair in row['pairs']]
         graph=(row['anchor_view']['candidate_temporal'] if uses_anchor else row.get('temporal',{}))
-        if getattr(model,'variant',None) in ('graph','anchor_graph'):
+        if getattr(model,'variant',None) in ('graph','anchor_graph','anchor_graph_event'):
             if a not in graph:
                 raise ValueError('Graph predictor has no source temporal evidence')
             with torch.no_grad():

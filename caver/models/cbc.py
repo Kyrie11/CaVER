@@ -54,7 +54,7 @@ class CascadeRiskHead(nn.Module):
     """Physics-anchored event/boundary correction; no raw risk-score only head."""
     def __init__(self,width=96,variant='full'):
         super().__init__()
-        if variant not in ('full','no_events','graph','anchor_full','anchor_graph'):
+        if variant not in ('full','no_events','graph','anchor_full','anchor_graph','anchor_graph_event'):
             raise ValueError('Unknown CBC model variant')
         self.variant=variant
         self.feature_norm=nn.LayerNorm(len(FEATURES))
@@ -177,7 +177,7 @@ def load(path):
     m=CascadeRiskHead(variant=variant)
     if record.get('has_graph'):
         from caver.models.temporal import GraphCascadeRiskHead
-        m.graph_model=GraphCascadeRiskHead(len(FEATURES))
+        m.graph_model=GraphCascadeRiskHead(len(FEATURES), event_pool=(variant=='anchor_graph_event'))
     if record.get('has_joint_head'):
         m.joint=JointRiskHead(suppress_events=(variant=='no_events'))
     m.load_state_dict(record['weights']);m.eval();m.meta=record.get('meta',{})

@@ -66,7 +66,13 @@ def source_temporal_graph(scene, rollouts, dt_sample=.4):
                 edges.append([i,j,lag])
     return {'actors':ids,'nodes':nodes.astype('float32').tolist(),
             'edges':edges,'sample_dt':float(dt_sample),'source_only':True,
-            'edge_screen':'INITIAL_REACHABILITY_HEURISTIC_NOT_PHYSICAL_COMPLETENESS'}
+            'edge_screen':'INITIAL_REACHABILITY_HEURISTIC_NOT_PHYSICAL_COMPLETENESS',
+            'latency_accounting':{
+                'behavior_delay_in_source_rollout':True,
+                'driver_delay_channel_is_descriptive':True,
+                'graph_lag_semantics':'representation_transport_lag_not_callback_latency',
+                'online_callback_latency_measured':False,
+                'double_counting_guard':'Do not add driver_delay again to the online guard; use residual evidence age.'}}
 
 
 class DelayedGraphEncoder(nn.Module):
@@ -107,8 +113,9 @@ class GraphCascadeRiskHead(nn.Module):
 
     This is a trainable graph baseline, NOT a verified anchor-reuse oracle.
     """
-    def __init__(self,feature_dim,channels=24):
+    def __init__(self,feature_dim,channels=24,event_pool=False):
         super().__init__()
+        self.event_pool=bool(event_pool)
         self.graph=DelayedGraphEncoder(channels=channels)
         self.pair=nn.Sequential(nn.Linear(feature_dim+channels*3,64),nn.SiLU(),
                                 nn.Linear(64,64),nn.SiLU(),nn.Linear(64,3))
@@ -117,7 +124,16 @@ class GraphCascadeRiskHead(nn.Module):
         nodes=torch.as_tensor(graph_data['nodes'],dtype=x.dtype,device=x.device)
         edges=graph_data['edges']
         ids=graph_data['actors']
-        h=self.graph(nodes,edges).mean(dim=0)
+        h_time=self.graph(nodes,edges)
+        if self.event_pool:
+            # Keep braking/onset boundary information instead of averaging it
+            # uniformly over the full horizon. This is a learned evidence
+            # representation, not a physical event certificate.
+            event_score=torch.relu(-nodes[...,4]).mean(dim=1)+torch.relu(-nodes[...,3]).mean(dim=1)
+            weights=1.+4.*event_score
+            h=(h_time*weights[:,None,None]).sum(dim=0)/weights.sum().clamp_min(1e-6)
+        else:
+            h=h_time.mean(dim=0)
         # Shared time causal graph features for both selected pair roles and
         # the scene-wide source response. Pair potential is order-independent.
         globally=h.mean(dim=0)

@@ -20,10 +20,24 @@ else
     --output "$OUT/split_audit.json" >/dev/null
 fi
 for f in "$TRAIN" "$TEST" "$DEV";do [[ -f "$f" ]] || { echo "Missing $f" >&2;exit 1;};done
+if [[ -f "$PWD/scripts/cbc_contract_audit.py" ]];then
+  if [[ "$DEV" == "$TRAIN" ]];then
+    python scripts/cbc_contract_audit.py --train "$TRAIN" --test "$TEST" \
+      --output "$OUT/contract_audit_pretrain.json" >/dev/null
+  else
+    python scripts/cbc_contract_audit.py --train "$TRAIN" --test "$TEST" --calibration "$DEV" \
+      --output "$OUT/contract_audit_pretrain.json" >/dev/null
+  fi
+fi
 EPOCHS="${EPOCHS:-35}"
 GRAPH_EPOCHS="${GRAPH_EPOCHS:-16}"
 BOOTSTRAP="${BOOTSTRAP:-600}"
 CONTRAST_WEIGHT="${CONTRAST_WEIGHT:-0.3}"
+SEED="${SEED:-11}"
+if [[ "${ALLOW_UNMATCHED_EPOCHS:-0}" != "1" && "$GRAPH_EPOCHS" != "$EPOCHS" ]];then
+  echo "ERROR: anchor_full and anchor_graph must use the same optimizer updates; set GRAPH_EPOCHS=EPOCHS or ALLOW_UNMATCHED_EPOCHS=1." >&2
+  exit 2
+fi
 GPU_COUNT=$(python - <<'PY'
 import torch
 print(torch.cuda.device_count() if torch.cuda.is_available() else 0)
@@ -41,11 +55,11 @@ train_one() {
   if [[ "$GPU_COUNT" -ge 2 ]];then
     CUDA_VISIBLE_DEVICES="$gpu" python -m caver.cli train-cbc --input "$TRAIN" \
        --variant "$variant" --epochs "$epochs" --device "$DEVICE" \
-       --contrast-weight "$weight" --output "$OUT/cbc_${name}.pt" \
+       --contrast-weight "$weight" --seed "$SEED" --output "$OUT/cbc_${name}.pt" \
        >"$OUT/train_${name}.log" 2>&1
   else
     python -m caver.cli train-cbc --input "$TRAIN" --variant "$variant" \
-       --epochs "$epochs" --device "$DEVICE" --contrast-weight "$weight" \
+       --epochs "$epochs" --device "$DEVICE" --contrast-weight "$weight" --seed "$SEED" \
        --output "$OUT/cbc_${name}.pt" >"$OUT/train_${name}.log" 2>&1
   fi
 }

@@ -5,6 +5,7 @@ Every incremental claim has a method-capacity-matched control and a paired
 scene-level confidence interval, if available.  Missing comparisons abstain.
 """
 import json
+import math
 from pathlib import Path
 
 
@@ -33,11 +34,16 @@ def summarize(study_path, boundary_path=None, min_resolved=30,
     n_match=int(baseline.get('matched_kinematic_proxy_scenes') or 0)
     n_sign=int(baseline.get('critical_pair_ref_sign_resolved') or 0)
     n_ref=int(report.get('reference_worlds_per_family') or 0)*len(report.get('reference_families',[]))
+    mc_meta=baseline.get('finite_mc_radius',{}) or {}
+    mc_alpha=float(mc_meta.get('alpha',.05))
+    mc_pairs=max(1,int(mc_meta.get('n_pairs',3)))
+    critical_delta=float(report.get('critical_pair_abs_delta_threshold',.20))
+    required_worlds=int(math.ceil(2.*math.log(2.*mc_pairs/mc_alpha)/(critical_delta**2)))
     needed=[]
     if n_scene<min_scenes:needed.append('TEST_SCENES_BELOW_DECLARED_MINIMUM')
     if n_match<min_matched:needed.append('KINEMATIC_MANEUVERS_MATCHED_BELOW_DECLARED_MINIMUM')
     if n_sign<min_resolved:needed.append('REFERENCE_RESOLVED_CRITICAL_PAIRS_BELOW_DECLARED_MINIMUM')
-    if n_ref<128:needed.append('REFERENCE_MONTE_CARLO_WORLD_COUNT_BELOW_RECOMMENDED_128')
+    if n_ref<required_worlds:needed.append('REFERENCE_MONTE_CARLO_WORLD_COUNT_BELOW_RESOLUTION_REQUIREMENT')
     comparisons={}
     for name,m in methods.items():
         comparisons[name]={
@@ -52,6 +58,8 @@ def summarize(study_path, boundary_path=None, min_resolved=30,
         boundary={'status':d.get('status'),'heldout':d.get('heldout'),
                   'screen_is_verified_physical_certificate':False}
         held=d.get('heldout',{})
+        if d.get('development_split') != ['calibration']:
+            needed.append('BOUNDARY_DEVELOPMENT_NOT_INDEPENDENT_CALIBRATION')
         if not held.get('reference_contact_flip_pairs'):
             needed.append('NO_HELDOUT_CONTACT_FLIP_PAIRS_FOR_SCREEN_EVALUATION')
         if d.get('status')!='FITTED_EMPIRICAL_SCREENER_NOT_CERTIFIED':
@@ -89,22 +97,29 @@ def summarize(study_path, boundary_path=None, min_resolved=30,
         novelty='PRELIMINARY_SIMULATOR_CONDITIONAL_COMPONENT_GAIN'
     else:
         novelty='DESCRIPTIVE_COMPONENT_GAIN_NOT_STATISTICALLY_RESOLVED'
-    c=3
+    candidate_actions=report.get('candidate_actions',['early','late'])
+    reference_actions=report.get('reference_baseline_actions',['reference'])
+    c=len(candidate_actions)
     cost={'description':'Per-scene SOURCE REACTOR rollout calls, NOT measured wall-clock latency',
           'source_candidate_recomputes_per_scene':c,
+          'candidate_actions':candidate_actions,
+          'reference_baseline_recomputes_per_scene':len(reference_actions),
+          'reference_baseline_actions':reference_actions,
           'source_rollouts_per_candidate':report.get('source_worlds_per_candidate'),
           'anchor_reuse_recomputes_per_scene':1,
           'single_anchor_rollouts_per_scene':report.get('source_worlds_per_candidate'),
-          'source_rollout_reduction_fraction':(c-1)/c,
+          'source_rollout_reduction_fraction':(c-1)/c if c else None,
           'scope':'Counting only: real inference, graph-head and fallback costs not measured'}
     return {'verdict':verdict,'novelty_verdict':novelty,
             'protocol':'CBC_V3_ABLATION_AND_EVIDENCE_ADEQUACY',
             'evidence_gaps':needed,
             'declared_thresholds':{'heldout_scenes':min_scenes,
                 'kinematic_matched_scenes':min_matched,
-                'reference_resolved_critical_pairs':min_resolved,'reference_worlds':128},
+                'reference_resolved_critical_pairs':min_resolved,'reference_worlds':required_worlds,
+                'reference_resolution_formula':'sqrt(2*log(2*n_pairs/alpha)/n_worlds)'},
             'observed_sample':{'heldout_scenes':n_scene,'kinematic_matched_scenes':n_match,
                 'reference_resolved_critical_pairs':n_sign,'reference_worlds_per_action':n_ref,
+                'reference_worlds_required_for_delta':required_worlds,
                 'reference_matched_contact_flip_pairs':baseline.get('reference_matched_contact_flip_n'),
                 'reference_all_contact_flip_pairs':baseline.get('reference_any_pair_contact_flip_all_candidates_n'),
                 'reference_all_pair_comparisons':baseline.get('reference_all_pair_comparisons_n'),

@@ -456,14 +456,28 @@ def _calibration_points(records: Iterable[Mapping[str, Any]]) -> list[dict[str, 
     points: list[dict[str, Any]] = []
     for row in records:
         pred, aud = row.get("predicted", {}), row.get("audited", {})
-        for key, value in pred.items():
-            if not key.endswith("/down") and "/" not in key:
-                continue
-            p, y = _num(value), _num(aud.get(key))
-            if p is None or y is None:
-                continue
-            points.append({"prediction": p, "reference": y, "scene_id": row.get("scene_id"),
-                           "kind": "union" if key.endswith("/down") else "pair", "key": key})
+        # ``reference`` is an attribution baseline, not a planner candidate;
+        # exclude it from candidate calibration.  Explicitly classify ego,
+        # downstream-union, and non-ego-pair risks instead of inferring kind
+        # from arbitrary key suffixes.
+        actions = {str(a.get("action_id")) for a in row.get("actions", [])
+                   if isinstance(a, Mapping)} - {"reference"}
+        pairs = {str(p) for p in row.get("pairs", [])}
+        for action in sorted(actions):
+            for suffix, kind in (("/ego", "ego"), ("/down", "downstream_union")):
+                key = action + suffix
+                p, y = _num(pred.get(key)), _num(aud.get(key))
+                if p is not None and y is not None:
+                    points.append({"prediction": p, "reference": y,
+                                   "scene_id": row.get("scene_id"),
+                                   "kind": kind, "key": key})
+            for pair in sorted(pairs):
+                key = action + "/" + pair
+                p, y = _num(pred.get(key)), _num(aud.get(key))
+                if p is not None and y is not None:
+                    points.append({"prediction": p, "reference": y,
+                                   "scene_id": row.get("scene_id"),
+                                   "kind": "non_ego_pair", "key": key})
     return points
 
 
@@ -483,24 +497,30 @@ def rare_risk_calibration(
         return {"status": NOT_MEASURED, "reason": "no predicted/audited risk pairs"}
     bins = tuple(float(x) for x in bins)
     strata = []
-    for lo, hi in zip(bins[:-1], bins[1:]):
-        group = [x for x in points if lo <= x["prediction"] < hi or (hi == 1.0 and x["prediction"] <= hi)]
+    for kind in ("ego", "downstream_union", "non_ego_pair"):
+      kind_points = [x for x in points if x["kind"] == kind]
+      for lo, hi in zip(bins[:-1], bins[1:]):
+        group = [x for x in kind_points if (lo <= x["prediction"] < hi) or
+                 (hi == bins[-1] and lo <= x["prediction"] <= hi)]
         n = len(group)
         if not n:
-            strata.append({"lower": lo, "upper": hi, "count": 0,
+            strata.append({"kind": kind, "lower": lo, "upper": hi, "count": 0,
                            "mean_prediction": None, "mean_reference": None,
                            "abs_gap": None, "reference_mean_ece_contribution": None})
             continue
         mp = float(np.mean([x["prediction"] for x in group]))
         my = float(np.mean([x["reference"] for x in group]))
-        strata.append({"lower": lo, "upper": hi, "count": n,
+        strata.append({"kind": kind, "lower": lo, "upper": hi, "count": n,
                        "mean_prediction": mp, "mean_reference": my,
                        "abs_gap": abs(mp - my),
-                       "reference_mean_ece_contribution": n / len(points) * abs(mp - my),
+                       "reference_mean_ece_contribution": n / len(kind_points) * abs(mp - my) if kind_points else None,
                        "rare_risk": bool(hi <= .05)})
-    ece = float(sum(x["reference_mean_ece_contribution"] or 0.0 for x in strata))
-    return {"status": "MEASURED", "points": len(points), "bins": strata,
-            "reference_mean_ece": ece,
+    ece_by_kind = {}
+    for kind in ("ego", "downstream_union", "non_ego_pair"):
+        ece_by_kind[kind] = float(sum((x["reference_mean_ece_contribution"] or 0.0)
+                                      for x in strata if x["kind"] == kind))
+    return {"status": "MEASURED", "points": len(points), "candidate_points": len(points), "bins": strata,
+            "reference_mean_ece": ece_by_kind,
             "label": "finite-K surrogate reference mean; not binary ECE/Brier"}
 
 
@@ -512,13 +532,13 @@ def cost_rollup(records: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
     rollout: list[float] = []
     component: dict[str, list[float]] = defaultdict(list)
     for row in rows:
-        timing = row.get("timing", row.get("latency", {}))
+        timing = row.get("runtime", row.get("timing", row.get("latency", {})))
         if not isinstance(timing, Mapping): timing = {}
         x = _num(_get(timing, "total_ms", "wall_time_ms", "measured_walltime_ms"))
         if x is not None: total_ms.append(x)
-        c = _num(_get(row, "callback_count", "planning_callback_count", "timing.callback_count"))
+        c = _num(_get(row, "callback_count", "planning_callback_count", "runtime.callback_count", "timing.callback_count"))
         if c is not None: callback.append(c)
-        r = _num(_get(row, "rollout_count", "source_rollout_count", "timing.rollout_count"))
+        r = _num(_get(row, "rollout_count", "source_rollout_count", "runtime.source_rollout_calls", "timing.rollout_count"))
         if r is not None: rollout.append(r)
         for name in ("anchor_rollout_ms", "feature_ms", "cbc_ms", "graph_ms", "query_ms", "fallback_ms"):
             y = _num(_get(timing, name))
@@ -526,7 +546,7 @@ def cost_rollup(records: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
     declared_source = []
     for row in rows:
         worlds = _num(row.get("source_worlds"))
-        n_actions = len(_row_actions(row))
+        n_actions = len([a for a in _row_actions(row) if a != 'reference'])
         if worlds is not None and n_actions:
             declared_source.append(worlds * n_actions)
     result = {
@@ -538,6 +558,7 @@ def cost_rollup(records: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
         "rollout_count": _percentiles(rollout),
         "rollout_calls_per_100_decisions": float(np.mean(rollout) * 100.0) if rollout else None,
         "declared_source_rollouts_per_scene": _percentiles(declared_source),
+        "declared_source_rollouts_per_planning_candidates": _percentiles(declared_source),
         "declared_counts_are_not_wall_time": True,
         "missing_measurements": [k for k, v in {
             "total_wall_time_ms": total_ms, "callback_count": callback, "rollout_count": rollout

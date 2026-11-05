@@ -38,7 +38,7 @@ def parser():
     s=sub.add_parser('fourcar-mediation');s.add_argument('--out',required=True);s.add_argument('--seed',type=int,default=10);s.add_argument('--world-seed',type=int,default=10);s.add_argument('--family',default='late_brake')
     s=sub.add_parser('fourcar-scan');s.add_argument('--out',required=True);s.add_argument('--scenes',type=int,default=100);s.add_argument('--worlds',type=int,default=3);s.add_argument('--seed',type=int,default=100)
     s=sub.add_parser('collect');s.add_argument('--source',choices=['synthetic','synthetic-stress','womd-jsonl','nuplan-jsonl'],default='synthetic');s.add_argument('--input');s.add_argument('--split',choices=['train','calibration','test'],required=True);s.add_argument('--scenes',type=int,default=20);s.add_argument('--source-worlds',type=int,default=4);s.add_argument('--audit-worlds',type=int,default=16);s.add_argument('--checkpoint');s.add_argument('--source-family',choices=['delayed_idm','learned_logged','stress_source'],default='delayed_idm');s.add_argument('--policy-checkpoint');s.add_argument('--candidate-policy',choices=['fixed','observed-adaptive'],default='fixed');s.add_argument('--output',required=True)
-    s=sub.add_parser('train-cbc');s.add_argument('--input',required=True);s.add_argument('--variant',choices=['full','no_events','graph','anchor_full','anchor_graph'],default='full');s.add_argument('--epochs',type=int,default=80);s.add_argument('--device',default='auto');s.add_argument('--contrast-weight',type=float,default=0.);s.add_argument('--output',required=True)
+    s=sub.add_parser('train-cbc');s.add_argument('--input',required=True);s.add_argument('--variant',choices=['full','no_events','graph','anchor_full','anchor_graph','anchor_graph_event'],default='full');s.add_argument('--epochs',type=int,default=80);s.add_argument('--device',default='auto');s.add_argument('--contrast-weight',type=float,default=0.);s.add_argument('--seed',type=int,default=11);s.add_argument('--output',required=True)
     s=sub.add_parser('cbc-study',help='Compact held-out CBC baseline/ablation comparison')
     s.add_argument('--input',required=True)
     s.add_argument('--model',action='append',default=[],help='label=checkpoint.pt; repeat')
@@ -258,7 +258,7 @@ def run(args):
                 'reference_type':'SIMULATED_NOT_REAL_CAUSAL_LABEL','candidate_policy':args.candidate_policy,**stats})
     elif args.cmd=='train-cbc':
         from caver.experiment import fit_cbc,read_records
-        report(fit_cbc(list(read_records(args.input)),args.output,epochs=args.epochs,variant=args.variant,device=args.device,contrast_weight=args.contrast_weight))
+        report(fit_cbc(list(read_records(args.input)),args.output,epochs=args.epochs,variant=args.variant,device=args.device,contrast_weight=args.contrast_weight,seed=args.seed))
     elif args.cmd=='cbc-study':
         from caver.validation.cbc_study import study
         files={}

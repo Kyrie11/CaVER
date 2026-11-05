@@ -13,6 +13,7 @@ import numpy as np
 
 from caver.experiment import read_records,record_with_new_predictions
 from caver.models.cbc import load,coherent_project
+from caver.validation.extended_metrics import finite_mc_radius, finite_mc_radius_metadata, FINITE_MC_RADIUS_SCHEMA, FINITE_MC_RADIUS_FORMULA
 
 
 def _avg(v):
@@ -21,10 +22,10 @@ def _avg(v):
 
 def _score_prediction(row, predicted, threshold, detection):
     """Only kinematic/maneuver-matched comparisons enter the critical statistic."""
-    aud=row['audited'];names=[a['action_id'] for a in row['actions']]
+    aud=row['audited'];names=[a['action_id'] for a in row['actions'] if a['action_id'] in ('early','late')]
     if not ('early' in names and 'late' in names):
         return {'matched':0,'critical':[],'resolved':[],'pair_errors':[],
-                'down_errors':[],'regret':None,'event':[],'pair_errors_near':[],
+                'down_errors':[],'regret':None,'pair_regrets':[],'decision_abstain':None,'event':[],'pair_errors_near':[],
                 'pair_errors_far':[],'risk_reversal':False,'ego_safe':False}
     match=row.get('candidate_matching',{}).get('pairs',{}).get('early|late',{})
     eligible=bool(match.get('matched_kinematic_proxy',False))
@@ -37,11 +38,10 @@ def _score_prediction(row, predicted, threshold, detection):
     n=len(row.get('audit_families',[]))*int(row.get('audit_worlds_per_family',0))
     # Paired binary differences in [-1,+1]. Hoeffding bound on the reference
     # sample difference (not a CI for a real driver population).
-    radius=math.sqrt(2*math.log(40.)/n) if n>0 else math.inf
-    # A separate, conservative within-scene Bonferroni/Hoeffding bound is
-    # exposed; the legacy radius is NOT a simultaneous claim over 120 scenes.
     n_pairs=max(1,len(row['pairs']))
-    radius_scene=math.sqrt(2*math.log(2*n_pairs/.05)/n) if n>0 else math.inf
+    # Canonical finite-MC resolution radius shared with extended_metrics.
+    radius=finite_mc_radius(n,n_pairs,.05)
+    radius_scene=radius
     a,b='early','late'
     ego_safe=(aud[f'{a}/ego']<=.05 and aud[f'{b}/ego']<=.05)
     risk_reversal=eligible and ego_safe and abs(aud[f'{a}/down']-aud[f'{b}/down'])>=threshold
@@ -51,12 +51,14 @@ def _score_prediction(row, predicted, threshold, detection):
         est=float(predicted[f'{a}/{p}']-predicted[f'{b}/{p}'])
         if eligible and abs(true)>=threshold:
             events.append({'pair':p,'true_delta':true,'estimate':est,
-                           'sign_error':float((est*true)<=0 or abs(est)<detection),
                            'underresolution':float(abs(est)<detection),
+                           'sign_error':float(abs(est)>=detection and est*true<0),
+                           'critical_miss':float(abs(est)<detection or (est*true<0)),
                            'reference_sign_resolved':bool(abs(true)>radius),
                            'reference_sign_resolved_scene_familywise':bool(abs(true)>radius_scene),
                            'reference_mc_radius':radius,
-                           'reference_mc_radius_scene_familywise':radius_scene})
+                           'reference_mc_radius_scene_familywise':radius_scene,
+                           'finite_mc_radius':finite_mc_radius_metadata(n,n_pairs,.05)})
         for name in names:
             key=f'{name}/{p}'
             e=abs(float(predicted[key])-float(aud[key]))
@@ -73,17 +75,25 @@ def _score_prediction(row, predicted, threshold, detection):
                           'anchor_abs_clearance':bd['anchor_min_abs_clearance_m'],
                           'anchor_abs_guard':bd['anchor_min_abs_brake_guard_mps2']})
     down_errors=[abs(float(predicted[f'{name}/down'])-float(aud[f'{name}/down'])) for name in names]
-    regret=None
+    regret=None; pair_regrets=[]; decision_abstain=None
     if eligible and ego_safe:
-        # Safety *ranking only*: not a complete task-cost planning decision.
-        choice=min((a,b),key=lambda name:(predicted[f'{name}/down'],name))
-        regret=float(aud[f'{choice}/down']-min(aud[f'{a}/down'],aud[f'{b}/down']))
+        pred_safe=[name for name in (a,b) if float(predicted[f'{name}/ego'])<=.05]
+        ref_safe=[name for name in (a,b) if float(aud[f'{name}/ego'])<=.05]
+        decision_abstain=not bool(pred_safe)
+        if pred_safe and ref_safe:
+            choice=min(pred_safe,key=lambda name:(predicted[f'{name}/down'],name))
+            regret=float(aud[f'{choice}/down']-min(aud[f'{name}/down'] for name in ref_safe))
+            for p in row['pairs']:
+                pchoice=min(pred_safe,key=lambda name:(predicted[f'{name}/{p}'],name))
+                pair_regrets.append(float(aud[f'{pchoice}/{p}']-
+                                         min(aud[f'{name}/{p}'] for name in ref_safe)))
     return {'matched':int(eligible),'match_failure_codes':failures,
             'reference_ego_risk_early':float(aud[f'{a}/ego']),
             'reference_ego_risk_late':float(aud[f'{b}/ego']),
             'matched_ego_safe':bool(eligible and ego_safe),
             'critical':events,'resolved':[x for x in events if x['reference_sign_resolved']],
             'pair_errors':errors,'down_errors':down_errors,'regret':regret,
+            'pair_regrets':pair_regrets,'decision_abstain':decision_abstain,
             'event':pairs,'pair_errors_near':near,'pair_errors_far':far,
             'risk_reversal':risk_reversal,'ego_safe':ego_safe}
 
@@ -93,6 +103,7 @@ def _aggregate(rows):
     resolved=[c for r in rows for c in r['resolved']]
     errors=[x for r in rows for x in r['pair_errors']]
     reg=[r['regret'] for r in rows if r['regret'] is not None]
+    pair_reg=[x for r in rows for x in r.get('pair_regrets',[])]
     pairs=[p for r in rows for p in r['event']]
     hits=[p for p in pairs if p['reference_contact_flip']>0]
     matched_pairs=[p for r in rows if r['matched'] for p in r['event']]
@@ -105,6 +116,9 @@ def _aggregate(rows):
         'reference_matched_pair_comparisons_n':len(matched_pairs),
         'reference_matched_contact_flip_n':sum(p['reference_contact_flip']>0 for p in matched_pairs),
         'reference_familywise_within_scene_resolved_critical_n':len(familywise),
+        'finite_mc_radius':finite_mc_radius_metadata(
+            int(rows[0].get('audit_worlds_per_family',0))*len(rows[0].get('audit_families',[])) if rows else 0,
+            max(1, len(rows[0].get('pairs',[]))) if rows else 1, .05),
         'reference_mc_ci_familywise_scope':'within-scene pairwise only; not global-FWER across scenes',
         'matched_ego_safe_scenes':sum(int(r['matched'] and r['ego_safe']) for r in rows),
         'matched_downstream_contrast_scenes':sum(int(r['risk_reversal']) for r in rows),
@@ -112,12 +126,16 @@ def _aggregate(rows):
         'critical_pair_sign_error_rate':_avg([x['sign_error'] for x in critical]),
         'reference_resolved_sign_error_rate':_avg([x['sign_error'] for x in resolved]),
         'critical_pair_underresolution_rate':_avg([x['underresolution'] for x in critical]),
+        'critical_pair_miss_rate':_avg([x['critical_miss'] for x in critical]),
         'pair_reference_risk_mae':_avg(errors),
         'near_boundary_pair_risk_mae':_avg([x for r in rows for x in r['pair_errors_near']]),
         'far_boundary_pair_risk_mae':_avg([x for r in rows for x in r['pair_errors_far']]),
         'downstream_union_reference_risk_mae':_avg([x for r in rows for x in r['down_errors']]),
         'matched_ego_safe_safety_ranking_regret':_avg(reg),
         'matched_ego_safe_safety_ranking_n':len(reg),
+        'matched_ego_safe_pair_ranking_regret':_avg(pair_reg),
+        'matched_ego_safe_pair_ranking_n':len(pair_reg),
+        'predicted_ego_safe_decision_abstain_rate':_avg([float(r['decision_abstain']) for r in rows if r.get('decision_abstain') is not None]),
         'reference_any_pair_contact_flip_n':len(hits),
         'source_contact_flip_missed_reference_fraction':_avg([
             float(p['source_contact_flip']==0.) for p in hits]),
@@ -131,8 +149,9 @@ def _bootstrap(d1,d0,seed=51,n_boot=500):
         return {}
     rng=np.random.default_rng(seed);n=len(d1)
     keys=('critical_pair_sign_error_rate','reference_resolved_sign_error_rate',
-          'matched_ego_safe_safety_ranking_regret','pair_reference_risk_mae',
-          'downstream_union_reference_risk_mae')
+          'critical_pair_underresolution_rate','critical_pair_miss_rate',
+          'matched_ego_safe_safety_ranking_regret','matched_ego_safe_pair_ranking_regret',
+          'pair_reference_risk_mae','downstream_union_reference_risk_mae')
     samples={k:[] for k in keys}
     for _ in range(n_boot):
         idx=rng.integers(0,n,n)
@@ -218,6 +237,7 @@ def study(test_file,models,contrast=.20,detect=.05,bootstrap=500,max_examples=8)
                       'source_predicted_pair_delta':p['estimate'] if p else None})
         if len(cases)>=max_examples:break
     return {'protocol':'CBC_HELDOUT_SIMULATOR_CONDITIONAL_FALSIFICATION_V1',
+            'candidate_actions':['early','late'],'reference_baseline_actions':['reference'],
             'test_file_sha256':sha256(Path(test_file).read_bytes()).hexdigest(),
             'test_scenes':len(records),'reference_families':records[0]['audit_families'],
             'reference_worlds_per_family':records[0]['audit_worlds_per_family'],

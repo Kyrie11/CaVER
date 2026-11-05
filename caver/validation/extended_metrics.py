@@ -144,15 +144,34 @@ def yield_summary(rows: Iterable[dict[str, Any]], ego_threshold: float = .05):
     }
 
 
+FINITE_MC_RADIUS_SCHEMA = "paired_bernoulli_hoeffding_fwer_v1"
+FINITE_MC_RADIUS_FORMULA = "sqrt(2*log(2*n_pairs/alpha)/n_worlds)"
+
+def finite_mc_radius(n_worlds: int, n_pairs: int, alpha: float = .05) -> float:
+    """Conservative within-scene finite-MC radius for paired Bernoulli deltas.
+
+    The radius is a resolution threshold, not a confidence interval over scenes.
+    The Bonferroni factor covers the declared pair comparisons in one scene.
+    """
+    n_worlds = int(n_worlds); n_pairs = max(1, int(n_pairs))
+    if n_worlds <= 0:
+        return math.inf
+    if not 0. < alpha < 1.:
+        raise ValueError("alpha must lie in (0,1)")
+    return math.sqrt(2. * math.log(2. * n_pairs / alpha) / n_worlds)
+
+def finite_mc_radius_metadata(n_worlds: int, n_pairs: int, alpha: float = .05):
+    return {"schema": FINITE_MC_RADIUS_SCHEMA, "formula": FINITE_MC_RADIUS_FORMULA,
+            "alpha": float(alpha), "n_worlds": int(n_worlds),
+            "n_pairs": int(n_pairs), "radius": finite_mc_radius(n_worlds, n_pairs, alpha)}
+
+
 def _mc_radius(row, familywise=True):
     n = int(row.get('audit_worlds_per_family', 0)) * len(row.get('audit_families', []))
-    if n <= 0:
-        return math.inf
-    # Paired Bernoulli differences lie in [-1, 1].  This is a conservative
-    # finite-MC radius, not a confidence interval over road scenes.
     pairs = max(1, len(row.get('pairs', [])))
-    log_term = math.log(2. * pairs / .05) if familywise else math.log(40.)
-    return math.sqrt(2. * log_term / n)
+    # The non-familywise option is retained for API compatibility but uses the
+    # same declared radius; all current critical decisions are familywise.
+    return finite_mc_radius(n, pairs, .05)
 
 
 def critical_pair_metrics(rows: Iterable[dict[str, Any]], prediction_key: str = 'predicted',
@@ -400,14 +419,16 @@ def event_timing_summary(rows: Iterable[dict[str, Any]]):
             'convention': 'positive lead means trigger before reference onset'}
 
 
-def stratified_reference_calibration(rows: Iterable[dict[str, Any]], prediction_key: str = 'predicted'):
+def stratified_reference_calibration(rows: Iterable[dict[str, Any]], prediction_key: str = 'predicted', min_count: int = 20):
     """Reliability of finite reference means, stratified by boundary and risk."""
     bins = [0., .01, .05, .2, .5, 1.0000001]
     groups = defaultdict(list)
     for row in rows:
         pred = row.get(prediction_key, {})
         aud = row.get('audited', {})
-        for action in _actions(row):
+        # ``reference`` is an attribution baseline rather than a planner
+        # candidate and is excluded from CBC candidate calibration.
+        for action in (a for a in _actions(row) if a != 'reference'):
             for pair in row.get('pairs', []):
                 try:
                     p = float(pred[f'{action}/{pair}']); y = float(aud[f'{action}/{pair}'])
@@ -424,9 +445,16 @@ def stratified_reference_calibration(rows: Iterable[dict[str, Any]], prediction_
                                       'reference_mean': float(np.mean(ys)),
                                       'mae': float(np.mean(np.abs(np.asarray(ps) - np.asarray(ys)))),
                                       'mse': float(np.mean((np.asarray(ps) - np.asarray(ys)) ** 2)),
-                                      'label': 'finite_reference_mean_not_binary_ece'}
+                                      'residual_quantiles95': (lambda z: [float(np.quantile(z, .025)), float(np.quantile(z, .975))])(np.asarray(ps)-np.asarray(ys)) if len(vals)>=min_count else None,
+                                      'mae_ci95': None,
+                                      'count_minimum': int(min_count),
+                                      'meets_count_minimum': bool(len(vals)>=min_count),
+                                      'label': 'finite_reference_mean_not_binary_ece',
+                                      'interpretation': 'descriptive finite-reference mean error; do not call ECE'}
     return {'status': 'MEASURED' if out else 'NOT_MEASURED', 'strata': out,
-            'warning': 'Do not report these reference-mean errors as binary Brier/ECE without Bernoulli labels.'}
+            'bin_count_minimum': int(min_count),
+            'metric_name': 'stratified finite-reference mean error',
+            'warning': 'These are descriptive stratified errors for finite reference means, not ECE; bins below the count minimum have no CI.'}
 
 
 def runtime_summary(rows: Iterable[dict[str, Any]]):
@@ -446,7 +474,9 @@ def runtime_summary(rows: Iterable[dict[str, Any]]):
         return float(np.mean(vals) * 100.) if vals else None
     return {'status': 'MEASURED', 'scope': runtime[0].get('scope', 'UNDECLARED'),
             'latency_ms': {k: stats(k) for k in ('total_ms', 'source_ms', 'reference_ms', 'feature_ms', 'model_ms')},
-            'per_100_plans': {k: per100(k) for k in ('source_rollout_calls', 'reference_rollout_calls', 'callback_count')},
+            'per_100_plans': {k: per100(k) for k in ('source_rollout_calls', 'planning_source_rollout_calls',
+                                                       'reference_rollout_calls', 'callback_count')},
+            'planning_candidate_count_per_scene': _mean([float(x['planning_candidate_count']) for x in runtime if x.get('planning_candidate_count') is not None]),
             'reuse_fraction': _mean([float(x['reused']) for x in runtime if x.get('reused') is not None]),
             'fallback_fraction': _mean([float(x['fallback']) for x in runtime if x.get('fallback') is not None]),
             'warning': 'Collection timing is not online planning latency unless the transcript was captured at the planning callback boundary.'}
@@ -469,6 +499,7 @@ def extended_audit(rows: Iterable[dict[str, Any]], prediction_key: str = 'predic
         'event_timing': event_timing_summary(rows),
         'rare_risk_calibration': stratified_reference_calibration(rows, prediction_key),
         'runtime': runtime_summary(rows),
+        'cost_rollup': runtime_summary(rows),
         'limits': [
             'Reference outcomes are finite-MC simulator conditional means.',
             'Legal route is unknown when lawful_route_match is NOT_EVALUATED.',

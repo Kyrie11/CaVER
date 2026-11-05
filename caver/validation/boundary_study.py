@@ -59,8 +59,8 @@ def _cp_upper(k,n,confidence=.95):
 def study(dev_file,test_file,target_miss=.05):
     if not 0<=target_miss<1:raise ValueError('Invalid miss threshold')
     dev=list(read_records(dev_file));test=list(read_records(test_file))
-    if not dev or not test or any(r.get('experimental_split')!='train' for r in dev) or any(r.get('experimental_split')!='test' for r in test):
-        raise ValueError('Require independent train and test records')
+    if not dev or not test or any(r.get('experimental_split') not in ('train','calibration') for r in dev) or any(r.get('experimental_split')!='test' for r in test):
+        raise ValueError('Require independent train/calibration development and test records')
     if {x['scene_id'] for x in dev}&{x['scene_id'] for x in test}:
         raise ValueError('Train/test scene-ID overlap')
     def g(r):return r.get('scene',{}).get('provenance',{}).get('overlap_group',r['scene_id'])
@@ -89,7 +89,9 @@ def study(dev_file,test_file,target_miss=.05):
     # population only, not shifts or true driver counterfactuals.
     test_st['clopper_pearson_95pct_upper_miss_fraction']=_cp_upper(
         test_st['missed_flip_pairs'],test_st['reference_contact_flip_pairs'])
-    return {'status':status,'prediction_scope':'EMPIRICAL_SCREEN_ONLY_CERTIFIED_BETA_DEFAULTS_ONE',
+    return {'status':status,'development_split':sorted({r.get('experimental_split') for r in dev}),
+            'prediction_scope':'EMPIRICAL_SCREEN_ONLY_CERTIFIED_BETA_DEFAULTS_ONE',
+            'screen_definition':'DIMENSIONLESS_CLEARANCE_GUARD_HEURISTIC_NOT_LATENCY_GUARD',
             'training_pairs':len(training),'test_pairs':len(evaluation),
             'frozen_thresholds':{'clearance_multiplier':lm if math.isfinite(lm) else None,
                                  'brake_guard_multiplier':lg if math.isfinite(lg) else None},
@@ -98,6 +100,7 @@ def study(dev_file,test_file,target_miss=.05):
             'train_sha256':sha256(Path(dev_file).read_bytes()).hexdigest(),
             'test_sha256':sha256(Path(test_file).read_bytes()).hexdigest(),
             'not_claimed':['No verified guard Lipschitz, complete path graph, or swept geometry tolerance',
+                           'The fitted multipliers compare unlike units and are not a substitute for latency-adjusted occupancy margin',
                            'No real-world conditional safety or real-time speedup certificate',
                            'A source-model mode flip does not imply reference-model contact flip',
                            'Tuning thresholds on the held-out output invalidates this study']}
