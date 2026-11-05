@@ -44,7 +44,7 @@ def parser():
     s.add_argument('--model',action='append',default=[],help='label=checkpoint.pt; repeat')
     s.add_argument('--contrast',type=float,default=.2)
     s.add_argument('--detect',type=float,default=.05)
-    s.add_argument('--bootstrap',type=int,default=400)
+    s.add_argument('--bootstrap',type=int,default=2000)
     s.add_argument('--output',required=True)
     s=sub.add_parser('cbc-boundary-study',help='Empirical non-certified anchor reuse screen')
     s.add_argument('--development',required=True);s.add_argument('--test',required=True)

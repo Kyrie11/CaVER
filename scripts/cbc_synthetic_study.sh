@@ -14,11 +14,17 @@ case "$MODE" in
     : "${TRAIN_SCENES:=12}" "${CAL_SCENES:=0}" "${TEST_SCENES:=12}" "${SOURCE_WORLDS:=2}" "${AUDIT_WORLDS:=6}"
     : "${CBC_EPOCHS:=8}" "${GRAPH_EPOCHS:=3}" "${BOOTSTRAP:=100}" ;;
   study)
-    : "${TRAIN_SCENES:=100}" "${CAL_SCENES:=40}" "${TEST_SCENES:=120}" "${SOURCE_WORLDS:=8}" "${AUDIT_WORLDS:=96}"
-    : "${CBC_EPOCHS:=65}" "${GRAPH_EPOCHS:=20}" "${BOOTSTRAP:=1000}" ;;
+    : "${TRAIN_SCENES:=100}" "${CAL_SCENES:=40}" "${TEST_SCENES:=120}" "${SOURCE_WORLDS:=8}" "${AUDIT_WORLDS:=128}"
+    : "${CBC_EPOCHS:=65}" "${GRAPH_EPOCHS:=65}" "${BOOTSTRAP:=2000}" ;;
   *) echo 'MODE must be pilot or study' >&2;exit 2 ;;
 esac
 mkdir -p "$OUT"
+if [[ "$MODE" == "study" && "${RECORDS_ONLY:-0}" != "1" \
+      && "${ALLOW_UNMATCHED_EPOCHS:-0}" != "1" \
+      && "$CBC_EPOCHS" != "$GRAPH_EPOCHS" ]]; then
+  echo "ERROR: anchor_full and anchor_graph must use the same optimizer updates; set CBC_EPOCHS=GRAPH_EPOCHS or explicitly mark an exploratory run with ALLOW_UNMATCHED_EPOCHS=1." >&2
+  exit 2
+fi
 CHECKPOINT_ARGS=()
 printf 'CBC synthetic %s: %s train scenes, %s held-out scenes; reference K=2*%s\n' "$MODE" "$TRAIN_SCENES" "$TEST_SCENES" "$AUDIT_WORLDS"
 python -m pytest -q | tee "$OUT/pytest_summary.txt"

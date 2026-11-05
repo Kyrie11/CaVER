@@ -62,6 +62,8 @@ class CascadeRiskHead(nn.Module):
         self.output=nn.Linear(width,3) # contact logit correction, margin residual, stopping-slack residual
 
     def forward(self,x):
+        if self.variant in ('graph','anchor_graph','anchor_graph_event'):
+            raise RuntimeError('Graph CBC variants require graph_model(features, temporal_trace, pair_ids); dense forward is not defined')
         feature=x.clone()
         if self.variant=='no_events':
             # Keep source pair collision and clearance anchors, remove guard /
@@ -177,7 +179,14 @@ def load(path):
     m=CascadeRiskHead(variant=variant)
     if record.get('has_graph'):
         from caver.models.temporal import GraphCascadeRiskHead
-        m.graph_model=GraphCascadeRiskHead(len(FEATURES), event_pool=(variant=='anchor_graph_event'))
+        graph_weight=record['weights'].get('graph_model.graph.input.weight')
+        graph_channels=int(graph_weight.shape[0]) if graph_weight is not None else 16
+        m.graph_model=GraphCascadeRiskHead(
+            len(FEATURES), channels=graph_channels,
+            event_pool=(variant=='anchor_graph_event'))
+        for module in (m.feature_norm,m.encoder,m.output):
+            for parameter in module.parameters():
+                parameter.requires_grad_(False)
     if record.get('has_joint_head'):
         m.joint=JointRiskHead(suppress_events=(variant=='no_events'))
     m.load_state_dict(record['weights']);m.eval();m.meta=record.get('meta',{})

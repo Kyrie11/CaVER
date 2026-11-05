@@ -8,6 +8,7 @@ import torch
 from caver.sim.traffic import standard_fourcar,candidates,Action,sample_world,rollout
 from caver.models.cbc import FEATURES,all_downstream_pairs,pair_features,predict,predict_joint,coherent_project,training_loss,CascadeRiskHead,JointRiskHead,save,load
 from caver.validation.evidence import conformal_calibrate,Calibration,choose
+from caver.validation.extended_metrics import finite_mc_radius
 from caver.validation.tiv import propose,verify_source,query_features,learn_query_value
 
 
@@ -235,122 +236,223 @@ def paired_scene(scene,actions=None,source_family='delayed_idm',audit_families=(
     }
     return record
 
+def _contrastive_reference_mask(row, contrast_threshold=.20, alpha=.05):
+    """Return the resolved-critical pair mask for a matched ego-safe pair.
+
+    The smooth ranking objective is not trained on unmatched, ego-unsafe,
+    explicitly illegal, or finite-MC-unresolved contrasts. Unknown route
+    legality remains simulator-conditional and is not treated as verified.
+    """
+    match=row.get('candidate_matching',{}).get('pairs',{}).get('early|late',{})
+    if not match.get('matched_kinematic_proxy',False):
+        return None
+    if match.get('same_maneuver_intent') is not True:
+        return None
+    if match.get('kinematic_feasible_both') is not True:
+        return None
+    try:
+        d_e=float(match.get('d_e')); d_e_max=float(match.get('delta_e_max'))
+        d_j=float(match.get('task_cost_difference')); d_j_max=float(match.get('delta_J_max'))
+    except (TypeError,ValueError):
+        return None
+    if not (math.isfinite(d_e) and math.isfinite(d_e_max) and d_e<=d_e_max
+            and math.isfinite(d_j) and math.isfinite(d_j_max) and d_j<=d_j_max):
+        return None
+    law=match.get('lawful_route_match')
+    legal_unknown=(law is None or law in ('NOT_EVALUATED','UNVERIFIED'))
+    if law is not True and not legal_unknown:
+        return None
+    audited=row.get('audited',{})
+    try:
+        if float(audited['early/ego'])>.05 or float(audited['late/ego'])>.05:
+            return None
+        if not (math.isfinite(float(audited['early/ego']))
+                and math.isfinite(float(audited['late/ego']))):
+            return None
+    except (KeyError,TypeError,ValueError):
+        return None
+    pairs=list(row.get('pairs',[]))
+    n_worlds=int(row.get('audit_worlds_per_family',0))*len(row.get('audit_families',[]))
+    radius=finite_mc_radius(n_worlds,max(1,len(pairs)),alpha)
+    try:
+        delta=np.asarray([float(audited[f'early/{pair}'])-
+                          float(audited[f'late/{pair}']) for pair in pairs],dtype=float)
+    except (KeyError,TypeError,ValueError):
+        return None
+    if not np.all(np.isfinite(delta)):
+        return None
+    mask=(np.abs(delta)>=float(contrast_threshold)) & (np.abs(delta)>radius)
+    return mask if bool(np.any(mask)) else None
+
+
 def fit_cbc(records,output,epochs=75,seed=11,variant='full',device='auto',contrast_weight=0.):
+    """Train every CBC variant with an identical optimizer-update schedule.
+
+    Every (scene, action) group contributes exactly one optimizer update.
+    The optional resolved-critical contrastive objective is added to the
+    corresponding ``late`` group update rather than creating extra steps.
+    """
     torch.manual_seed(seed)
     if device=='auto':device='cuda:0' if torch.cuda.is_available() else 'cpu'
     if str(device).startswith('cuda') and not torch.cuda.is_available():
         raise ValueError('CUDA requested but torch.cuda.is_available() is false; install an appropriate CUDA PyTorch wheel')
     dev=torch.device(device)
     if contrast_weight<0:raise ValueError('contrast_weight must be nonnegative')
+    if epochs<1:raise ValueError('epochs must be positive')
     records=list(records)
     if any(r.get('experimental_split') not in ('train',None) for r in records):
         raise ValueError('CBC train data must not contain calibration/test rollouts')
-    X=[];Y=[];scene_groups=[]
+
     uses_anchor=variant.startswith('anchor_')
     uses_graph=variant in ('graph','anchor_graph','anchor_graph_event')
-    for row in records:
+    training_groups=[]
+    contrastive_data={}
+    example_count=0
+    for row_index,row in enumerate(records):
         pairs=row['pairs']
         if uses_anchor and 'anchor_view' not in row:
             raise ValueError('Anchor model requires one-anchor source evidence')
-        for a in [v['action_id'] for v in row['actions']]:
-            features=[(row['anchor_view']['candidate_features'][f'{a}/{p}'] if uses_anchor
-                       else row['diagnostics'][f'{a}/{p}']['features']) for p in pairs]
-            if features:
-                scene_groups.append((torch.tensor(np.asarray(features,np.float32)),
-                        torch.tensor([row['audited'][a+'/ego'],row['audited'][a+'/down']],dtype=torch.float32)))
-        for k,v in row['diagnostics'].items():
-            X.append(row['anchor_view']['candidate_features'][k] if uses_anchor else v['features'])
-            Y.append(v['target'])
-    if len(X)<6 or len(scene_groups)<2:raise ValueError('Need >=6 pairs and >=2 joint candidate labels')
-    X=torch.tensor(np.array(X,np.float32),device=dev);Y=torch.tensor(np.array(Y,np.float32),device=dev)
-    m=CascadeRiskHead(variant=variant);m.joint=JointRiskHead(suppress_events=(variant=='no_events'))
-    if uses_graph:
-        from caver.models.temporal import GraphCascadeRiskHead
-        m.graph_model=GraphCascadeRiskHead(len(FEATURES), event_pool=(variant=='anchor_graph_event'))
-    m=m.to(dev)
-    opt=torch.optim.AdamW(m.parameters(),lr=1e-3,weight_decay=1e-4)
-    graph_groups=[]
-    if uses_graph:
-        for row in records:
-            for a in [v['action_id'] for v in row['actions']]:
-                pairs=row['pairs']
-                graph=(row['anchor_view']['candidate_temporal'][a] if uses_anchor
-                       else row.get('temporal',{}).get(a))
+        action_features={}
+        action_traces={}
+        for action in [v['action_id'] for v in row['actions']]:
+            feature_rows=[
+                (row['anchor_view']['candidate_features'][f'{action}/{pair}'] if uses_anchor
+                 else row['diagnostics'][f'{action}/{pair}']['features'])
+                for pair in pairs]
+            if not feature_rows:
+                continue
+            features=torch.tensor(np.asarray(feature_rows,dtype=np.float32))
+            targets=torch.tensor(np.asarray([
+                row['diagnostics'][f'{action}/{pair}']['target'] for pair in pairs
+            ],dtype=np.float32))
+            joint=torch.tensor([
+                row['audited'][action+'/ego'],row['audited'][action+'/down']
+            ],dtype=torch.float32)
+            trace=None
+            if uses_graph:
+                graph=(row['anchor_view']['candidate_temporal'][action] if uses_anchor
+                       else row.get('temporal',{}).get(action))
                 if not graph:
                     raise ValueError('Graph variant requires source-only temporal traces in collected records')
-                features=torch.tensor([(row['anchor_view']['candidate_features'][f'{a}/{p}'] if uses_anchor
-                                        else row['diagnostics'][f'{a}/{p}']['features']) for p in pairs],dtype=torch.float32)
-                targets=torch.tensor([row['diagnostics'][f'{a}/{p}']['target'] for p in pairs],dtype=torch.float32)
-                joint=torch.tensor([row['audited'][a+'/ego'],row['audited'][a+'/down']],dtype=torch.float32)
-                graph_groups.append((features,targets,joint,graph,pairs))
+                trace=graph
+            action_features[action]=features
+            action_traces[action]=trace
+            training_groups.append((row_index,action,features,targets,joint,trace,pairs))
+            example_count+=len(feature_rows)
+
+        # Precompute the eligible contrastive supervision once. The same
+        # scene/pair mask is used by full, no_events, graph and anchor variants.
+        contrast_mask=_contrastive_reference_mask(row,contrast_threshold=.20,alpha=.05)
+        if contrast_mask is not None and 'early' in action_features and 'late' in action_features:
+            target=torch.tensor([
+                row['audited']['early/'+pair]-row['audited']['late/'+pair]
+                for pair in pairs
+            ],dtype=torch.float32)
+            contrastive_data[row_index]={
+                'features':{'early':action_features['early'],'late':action_features['late']},
+                'traces':{'early':action_traces['early'],'late':action_traces['late']},
+                'pairs':pairs,'target':target,'mask':torch.as_tensor(contrast_mask,dtype=torch.bool)
+            }
+
+    if example_count<6 or len(training_groups)<2:
+        raise ValueError('Need >=6 pairs and >=2 joint candidate labels')
+
+    m=CascadeRiskHead(variant=variant)
+    m.joint=JointRiskHead(suppress_events=(variant=='no_events'))
+    if uses_graph:
+        from caver.models.temporal import GraphCascadeRiskHead
+        m.graph_model=GraphCascadeRiskHead(
+            len(FEATURES),channels=16,event_pool=(variant=='anchor_graph_event'))
+        # Graph variants use graph_model for pair prediction; freeze the
+        # unused dense pair head so it is neither trained nor counted as
+        # active capacity. It remains in the state dict for old API shape.
+        for module in (m.feature_norm,m.encoder,m.output):
+            for parameter in module.parameters():
+                parameter.requires_grad_(False)
+
+    m=m.to(dev)
+    active_parameters=[p for p in m.parameters() if p.requires_grad]
+    opt=torch.optim.AdamW(active_parameters,lr=1e-3,weight_decay=1e-4)
+    updates_per_epoch=len(training_groups)
+    contrastive_pair_count=sum(int(v['mask'].sum()) for v in contrastive_data.values())
+    optimizer_updates=0
+    losses=[]
+
     for ep in range(epochs):
-        perm=torch.randperm(len(X));groups=torch.randperm(len(scene_groups)).tolist();losses=[]
-        if uses_graph:
-            for idx in torch.randperm(len(graph_groups)).tolist():
-                feat,y,joint,trace,pairs=graph_groups[idx]
-                feat=feat.to(dev);y=y.to(dev);joint=joint.to(dev)
-                pair_pred=m.graph_model(feat,trace,pairs)
-                joint_pred=m.joint(feat)
-                loss=training_loss(pair_pred,y)+torch.nn.functional.binary_cross_entropy(
-                    joint_pred.clamp(1e-6,1-1e-6),joint)
-                opt.zero_grad();loss.backward()
-                torch.nn.utils.clip_grad_norm_(m.parameters(),3.);opt.step()
-                losses.append(float(loss.detach()))
-        else:
-            for b in perm.split(128):
-                z=m(X[b]);loss=training_loss(z,Y[b]);opt.zero_grad();loss.backward();
-                torch.nn.utils.clip_grad_norm_(m.parameters(),3.);opt.step();losses.append(float(loss.detach()))
-            # Joint events are supervised from complete independent rollouts.
-            for sidx in groups:
-                feat,y=scene_groups[sidx]
-                feat=feat.to(dev);y=y.to(dev)
-                output_joint=m.joint(feat)
-                loss_joint=torch.nn.functional.binary_cross_entropy(output_joint.clamp(1e-6,1-1e-6),y)
-                opt.zero_grad();loss_joint.backward()
-                torch.nn.utils.clip_grad_norm_(m.parameters(),3.);opt.step()
-                losses.append(float(loss_joint.detach()))
-        # Optional action-contrastive objective. Reference outcomes appear ONLY
-        # in training supervision, never as candidate-selection or test inputs.
-        # The same pre-outcome matching mask is used for every model variant.
-        if contrast_weight>0:
-            for row in records:
-                matching=row.get('candidate_matching',{}).get('pairs',{}).get('early|late',{})
-                if not matching.get('matched_kinematic_proxy',False):continue
-                pair_ids=row['pairs'];deltas=[]
-                for act in ('early','late'):
-                    feat=torch.tensor(np.asarray([
-                        (row['anchor_view']['candidate_features'][f'{act}/{pair}'] if uses_anchor
-                        else row['diagnostics'][f'{act}/{pair}']['features']) for pair in pair_ids],np.float32),device=dev)
-                    if uses_graph:
-                        tr=(row['anchor_view']['candidate_temporal'][act] if uses_anchor
-                            else row['temporal'][act])
-                        risk=m.graph_model(feat,tr,pair_ids)[:,0]
-                    else:
-                        risk=m(feat)[:,0]
-                    deltas.append(risk)
-                estimate=deltas[0]-deltas[1]
-                target=torch.tensor([row['audited']['early/'+p]-row['audited']['late/'+p]
-                                     for p in pair_ids],dtype=torch.float32,device=dev)
-                # Regression is defined even for zero-contrast cases. For
-                # substantial reference differences, add a smooth ranking term.
-                reg=torch.nn.functional.smooth_l1_loss(estimate,target,beta=.15)
-                active=(torch.abs(target)>=.1).float()
-                margin=(torch.nn.functional.softplus(.04-
-                        torch.sign(target)*estimate)*active).sum()/active.sum().clamp_min(1.)
-                loss_ctr=contrast_weight*(reg+.1*margin)
-                opt.zero_grad();loss_ctr.backward()
-                torch.nn.utils.clip_grad_norm_(m.parameters(),3.);opt.step()
-                losses.append(float(loss_ctr.detach()))
+        order=torch.randperm(len(training_groups)).tolist()
+        for idx in order:
+            row_index,action,features,targets,joint,trace,pairs=training_groups[idx]
+            features=features.to(dev);targets=targets.to(dev);joint=joint.to(dev)
+            if uses_graph:
+                pair_prediction=m.graph_model(features,trace,pairs)
+            else:
+                pair_prediction=m(features)
+            joint_prediction=m.joint(features)
+            loss=training_loss(pair_prediction,targets)+torch.nn.functional.binary_cross_entropy(
+                joint_prediction.clamp(1e-6,1-1e-6),joint)
+
+            # Add the contrastive term to the late-action update for this
+            # scene. It uses only matched, ego-safe, finite-MC-resolved
+            # critical pairs, and does not increase optimizer update count.
+            if contrast_weight>0 and action=='late' and row_index in contrastive_data:
+                cd=contrastive_data[row_index]
+                pair_ids=cd['pairs']
+                early_features=cd['features']['early'].to(dev)
+                late_features=cd['features']['late'].to(dev)
+                if uses_graph:
+                    early_risk=m.graph_model(early_features,cd['traces']['early'],pair_ids)[:,0]
+                    late_risk=m.graph_model(late_features,cd['traces']['late'],pair_ids)[:,0]
+                else:
+                    early_risk=m(early_features)[:,0]
+                    late_risk=m(late_features)[:,0]
+                estimate=early_risk-late_risk
+                target=cd['target'].to(dev)
+                active=cd['mask'].to(dev)
+                reg=torch.nn.functional.smooth_l1_loss(estimate[active],target[active],beta=.15)
+                margin=torch.nn.functional.softplus(
+                    .04-torch.sign(target[active])*estimate[active]).mean()
+                loss=loss+contrast_weight*(reg+.1*margin)
+
+            opt.zero_grad();loss.backward()
+            torch.nn.utils.clip_grad_norm_(active_parameters,3.);opt.step()
+            optimizer_updates+=1
+            losses.append(float(loss.detach()))
+
     m=m.to('cpu')
-    save(m,output,{'training_scenes':len(records),'example_count':len(X),'joint_examples':len(scene_groups),
-                   'train_source':'simulator_reference','variant':variant,'seed':seed,'slack_masked':True,
-                   'training_device':str(dev),'contrast_weight':contrast_weight,
+    active_parameter_count=sum(p.numel() for p in m.parameters() if p.requires_grad)
+    total_parameter_count=sum(p.numel() for p in m.parameters())
+    training_scene_hashes=[sha256(r['scene_id'].encode()).hexdigest() for r in records]
+    training_group_hashes=[
+        sha256(str(r.get('scene',{}).get('provenance',{}).get('overlap_group',r['scene_id'])).encode()).hexdigest()
+        for r in records]
+    save(m,output,{'training_scenes':len(records),'example_count':example_count,
+                   'joint_examples':len(training_groups),'training_groups_per_epoch':len(training_groups),
+                   'optimizer_updates_per_epoch':updates_per_epoch,
+                   'optimizer_updates_total':optimizer_updates,
+                   'contrastive_scenes_per_epoch':len(contrastive_data),
+                   'contrastive_pairs_per_epoch':contrastive_pair_count,
+                   'contrast_threshold':.20,
+                   'active_parameter_count':active_parameter_count,
+                   'total_parameter_count':total_parameter_count,
+                   'graph_channels':16 if uses_graph else None,
+                   'train_source':'simulator_reference','variant':variant,'seed':seed,
+                   'epochs':epochs,'slack_masked':True,'training_device':str(dev),
+                   'contrast_weight':contrast_weight,
                    'prediction_source':'ONE_ANCHOR_REUSE' if uses_anchor else 'FULL_CANDIDATE_CONDITIONED_SOURCE',
-                   'training_scene_sha256':[sha256(r['scene_id'].encode()).hexdigest() for r in records],
-                   'training_group_sha256':[sha256(str(r.get('scene',{}).get('provenance',{}).get('overlap_group',r['scene_id'])).encode()).hexdigest() for r in records]})
-    return {'output':str(output),'train_scenes':len(records),'pairs':len(X),
-            'joint_examples':len(scene_groups),'variant':variant,'loss':float(np.mean(losses)),
-            'training_device':str(dev),'contrast_weight':contrast_weight}
+                   'training_scene_sha256':training_scene_hashes,
+                   'training_group_sha256':training_group_hashes})
+    return {'output':str(output),'train_scenes':len(records),'pairs':example_count,
+            'joint_examples':len(training_groups),'variant':variant,
+            'loss':float(np.mean(losses)) if losses else None,
+            'training_device':str(dev),'contrast_weight':contrast_weight,
+            'epochs':epochs,'optimizer_updates_per_epoch':updates_per_epoch,
+            'optimizer_updates_total':optimizer_updates,
+            'contrastive_scenes_per_epoch':len(contrastive_data),
+            'contrastive_pairs_per_epoch':contrastive_pair_count,
+            'contrast_threshold':.20,
+            'active_parameter_count':active_parameter_count,
+            'total_parameter_count':total_parameter_count}
+
 
 def record_with_new_predictions(row,model):
     uses_anchor=getattr(model,'variant','').startswith('anchor_')

@@ -21,36 +21,81 @@ def _avg(v):
 
 
 def _score_prediction(row, predicted, threshold, detection):
-    """Only kinematic/maneuver-matched comparisons enter the critical statistic."""
-    aud=row['audited'];names=[a['action_id'] for a in row['actions'] if a['action_id'] in ('early','late')]
+    """Score critical ranking only on matched, ego-safe candidate pairs.
+
+    Unknown route legality is retained for simulator-conditional diagnostics,
+    but an explicitly illegal pair is excluded.  Unknown legality is never
+    counted as verified legal evidence.
+    """
+    aud=row['audited']
+    names=[a['action_id'] for a in row['actions']
+           if a['action_id'] in ('early','late')]
+    empty = {'matched':0, 'analysis_eligible':False, 'lawful_route_match':None,
+             'matched_ego_safe':False, 'matched_legal_ego_safe':False,
+             'matched_ego_safe_legal_unknown':False,
+             'critical':[], 'resolved':[], 'pair_errors':[], 'down_errors':[],
+             'regret':None, 'pair_regrets':[], 'decision_abstain':None,
+             'event':[], 'pair_errors_near':[], 'pair_errors_far':[],
+             'risk_reversal':False, 'ego_safe':False}
     if not ('early' in names and 'late' in names):
-        return {'matched':0,'critical':[],'resolved':[],'pair_errors':[],
-                'down_errors':[],'regret':None,'pair_regrets':[],'decision_abstain':None,'event':[],'pair_errors_near':[],
-                'pair_errors_far':[],'risk_reversal':False,'ego_safe':False}
+        return empty
+
     match=row.get('candidate_matching',{}).get('pairs',{}).get('early|late',{})
-    eligible=bool(match.get('matched_kinematic_proxy',False))
     failures=[]
-    if not match.get('same_maneuver_intent',False):failures.append('INTENT_MISMATCH')
-    if float(match.get('d_e',float('inf')))>float(match.get('delta_e_max',0.)):failures.append('EGO_TRAJECTORY_DISTANCE')
-    if float(match.get('task_cost_difference',float('inf')))>float(match.get('delta_J_max',0.)):failures.append('TASK_COMFORT_MISMATCH')
-    if not match.get('kinematic_feasible_both',False):failures.append('EGO_DYNAMICS')
-    if not failures and not eligible:failures.append('UNKNOWN_MATCH_FAILURE')
+
+    def _within(value, limit):
+        try:
+            value=float(value); limit=float(limit)
+            return math.isfinite(value) and math.isfinite(limit) and value <= limit
+        except (TypeError, ValueError):
+            return False
+
+    if match.get('same_maneuver_intent') is not True:
+        failures.append('INTENT_MISMATCH')
+    if not _within(match.get('d_e'), match.get('delta_e_max')):
+        failures.append('EGO_TRAJECTORY_DISTANCE')
+    if not _within(match.get('task_cost_difference'), match.get('delta_J_max')):
+        failures.append('TASK_COMFORT_MISMATCH')
+    if match.get('kinematic_feasible_both') is not True:
+        failures.append('EGO_DYNAMICS')
+
+    reported_proxy=bool(match.get('matched_kinematic_proxy',False))
+    kinematic_matched=reported_proxy and not failures
+    if not reported_proxy and not failures:
+        failures.append('UNKNOWN_MATCH_FAILURE')
+
+    law=match.get('lawful_route_match')
+    legal_unknown=(law is None or law in ('NOT_EVALUATED','UNVERIFIED'))
+    legal_ok=(law is True or legal_unknown)
+    if law is False:
+        failures.append('ROUTE_ILLEGAL')
+    elif not legal_ok:
+        failures.append('ROUTE_LEGALITY_UNSUPPORTED')
+
+    # The synthetic protocol may retain unknown legal status for a
+    # simulator-conditional analysis, but never for a legal-route claim.
+    eligible=kinematic_matched and legal_ok
+
     n=len(row.get('audit_families',[]))*int(row.get('audit_worlds_per_family',0))
-    # Paired binary differences in [-1,+1]. Hoeffding bound on the reference
-    # sample difference (not a CI for a real driver population).
     n_pairs=max(1,len(row['pairs']))
-    # Canonical finite-MC resolution radius shared with extended_metrics.
     radius=finite_mc_radius(n,n_pairs,.05)
     radius_scene=radius
     a,b='early','late'
-    ego_safe=(aud[f'{a}/ego']<=.05 and aud[f'{b}/ego']<=.05)
-    risk_reversal=eligible and ego_safe and abs(aud[f'{a}/down']-aud[f'{b}/down'])>=threshold
+    ego_early=float(aud[f'{a}/ego'])
+    ego_late=float(aud[f'{b}/ego'])
+    ego_safe=(math.isfinite(ego_early) and math.isfinite(ego_late)
+              and ego_early<=.05 and ego_late<=.05)
+    risk_reversal=(eligible and ego_safe
+                   and abs(float(aud[f'{a}/down'])-float(aud[f'{b}/down']))>=threshold)
+
     pairs=[];errors=[];near=[];far=[];events=[]
-    for p in row['pairs']:
-        true=float(aud[f'{a}/{p}']-aud[f'{b}/{p}'])
-        est=float(predicted[f'{a}/{p}']-predicted[f'{b}/{p}'])
-        if eligible and abs(true)>=threshold:
-            events.append({'pair':p,'true_delta':true,'estimate':est,
+    for pair in row['pairs']:
+        true=float(aud[f'{a}/{pair}']-aud[f'{b}/{pair}'])
+        est=float(predicted[f'{a}/{pair}']-predicted[f'{b}/{pair}'])
+        # Primary critical ranking denominator: matched, not explicitly
+        # illegal, and both candidate actions reference-ego-safe.
+        if eligible and ego_safe and abs(true)>=threshold:
+            events.append({'scene_id':row.get('scene_id'),'pair':pair,'true_delta':true,'estimate':est,
                            'underresolution':float(abs(est)<detection),
                            'sign_error':float(abs(est)>=detection and est*true<0),
                            'critical_miss':float(abs(est)<detection or (est*true<0)),
@@ -59,22 +104,26 @@ def _score_prediction(row, predicted, threshold, detection):
                            'reference_mc_radius':radius,
                            'reference_mc_radius_scene_familywise':radius_scene,
                            'finite_mc_radius':finite_mc_radius_metadata(n,n_pairs,.05)})
+        # Regression MAE remains a broad all-scene candidate diagnostic;
+        # it is not the matched/ego-safe primary ranking denominator.
         for name in names:
-            key=f'{name}/{p}'
+            key=f'{name}/{pair}'
             e=abs(float(predicted[key])-float(aud[key]))
             errors.append(e)
-            d=row.get('boundary_diagnostics',{}).get(p,{})
+            d=row.get('boundary_diagnostics',{}).get(pair,{})
             dist=d.get('anchor_min_abs_clearance_m')
             if dist is not None:
                 (near if dist<=2. else far).append(e)
-        bd=row.get('boundary_diagnostics',{}).get(p,{})
+        bd=row.get('boundary_diagnostics',{}).get(pair,{})
         if bd:
-            pairs.append({'pair':p,'reference_contact_flip':bd['reference']['contact_flip_rate'],
+            pairs.append({'pair':pair,'reference_contact_flip':bd['reference']['contact_flip_rate'],
                           'source_contact_flip':bd['source']['contact_flip_rate'],
                           'ref_guard_flip':bd['reference']['any_brake_guard_flip_rate'],
                           'anchor_abs_clearance':bd['anchor_min_abs_clearance_m'],
                           'anchor_abs_guard':bd['anchor_min_abs_brake_guard_mps2']})
-    down_errors=[abs(float(predicted[f'{name}/down'])-float(aud[f'{name}/down'])) for name in names]
+
+    down_errors=[abs(float(predicted[f'{name}/down'])-float(aud[f'{name}/down']))
+                 for name in names]
     regret=None; pair_regrets=[]; decision_abstain=None
     if eligible and ego_safe:
         pred_safe=[name for name in (a,b) if float(predicted[f'{name}/ego'])<=.05]
@@ -83,14 +132,21 @@ def _score_prediction(row, predicted, threshold, detection):
         if pred_safe and ref_safe:
             choice=min(pred_safe,key=lambda name:(predicted[f'{name}/down'],name))
             regret=float(aud[f'{choice}/down']-min(aud[f'{name}/down'] for name in ref_safe))
-            for p in row['pairs']:
-                pchoice=min(pred_safe,key=lambda name:(predicted[f'{name}/{p}'],name))
-                pair_regrets.append(float(aud[f'{pchoice}/{p}']-
-                                         min(aud[f'{name}/{p}'] for name in ref_safe)))
-    return {'matched':int(eligible),'match_failure_codes':failures,
-            'reference_ego_risk_early':float(aud[f'{a}/ego']),
-            'reference_ego_risk_late':float(aud[f'{b}/ego']),
-            'matched_ego_safe':bool(eligible and ego_safe),
+            for pair in row['pairs']:
+                pchoice=min(pred_safe,key=lambda name:(predicted[f'{name}/{pair}'],name))
+                pair_regrets.append(float(aud[f'{pchoice}/{pair}']-
+                                         min(aud[f'{name}/{pair}'] for name in ref_safe)))
+
+    matched_ego_safe=bool(eligible and ego_safe)
+    return {'matched':int(kinematic_matched),
+            'analysis_eligible':bool(eligible),
+            'lawful_route_match':law if isinstance(law,bool) else None,
+            'matched_ego_safe':matched_ego_safe,
+            'matched_legal_ego_safe':bool(kinematic_matched and ego_safe and law is True),
+            'matched_ego_safe_legal_unknown':bool(kinematic_matched and ego_safe and legal_unknown),
+            'match_failure_codes':failures,
+            'reference_ego_risk_early':ego_early,
+            'reference_ego_risk_late':ego_late,
             'critical':events,'resolved':[x for x in events if x['reference_sign_resolved']],
             'pair_errors':errors,'down_errors':down_errors,'regret':regret,
             'pair_regrets':pair_regrets,'decision_abstain':decision_abstain,
@@ -108,6 +164,7 @@ def _aggregate(rows):
     hits=[p for p in pairs if p['reference_contact_flip']>0]
     matched_pairs=[p for r in rows if r['matched'] for p in r['event']]
     familywise=[c for c in critical if c['reference_sign_resolved_scene_familywise']]
+    resolved_scene_ids={str(c['scene_id']) for c in resolved if c.get('scene_id') is not None}
     reasons=Counter(reason for r in rows for reason in r.get('match_failure_codes',[]))
     return {'scenes':len(rows),'matched_kinematic_proxy_scenes':sum(r['matched'] for r in rows),
         'match_failure_codes':dict(reasons),
@@ -120,9 +177,12 @@ def _aggregate(rows):
             int(rows[0].get('audit_worlds_per_family',0))*len(rows[0].get('audit_families',[])) if rows else 0,
             max(1, len(rows[0].get('pairs',[]))) if rows else 1, .05),
         'reference_mc_ci_familywise_scope':'within-scene pairwise only; not global-FWER across scenes',
-        'matched_ego_safe_scenes':sum(int(r['matched'] and r['ego_safe']) for r in rows),
+        'matched_ego_safe_scenes':sum(int(r.get('matched_ego_safe',False)) for r in rows),
+        'matched_legal_ego_safe_scenes':sum(int(r.get('matched_legal_ego_safe',False)) for r in rows),
+        'matched_ego_safe_legal_unknown_scenes':sum(int(r.get('matched_ego_safe_legal_unknown',False)) for r in rows),
         'matched_downstream_contrast_scenes':sum(int(r['risk_reversal']) for r in rows),
         'critical_pair_tests':len(critical),'critical_pair_ref_sign_resolved':len(resolved),
+        'critical_pair_ref_sign_resolved_scenes':len(resolved_scene_ids),
         'critical_pair_sign_error_rate':_avg([x['sign_error'] for x in critical]),
         'reference_resolved_sign_error_rate':_avg([x['sign_error'] for x in resolved]),
         'critical_pair_underresolution_rate':_avg([x['underresolution'] for x in critical]),
@@ -161,10 +221,13 @@ def _bootstrap(d1,d0,seed=51,n_boot=500):
                 samples[k].append(a[k]-b[k])
     return {k:{'delta_method_minus_source':float(np.mean(v)),
                'bootstrap_95pct_ci':[float(np.quantile(v,.025)),float(np.quantile(v,.975))],
-               'resamples_valid':len(v)} for k,v in samples.items() if v}
+               'resamples_valid':len(v),
+               'resamples_requested':int(n_boot),
+               'resamples_valid_fraction':float(len(v)/n_boot) if n_boot else 0.0}
+            for k,v in samples.items() if v}
 
 
-def study(test_file,models,contrast=.20,detect=.05,bootstrap=500,max_examples=8):
+def study(test_file,models,contrast=.20,detect=.05,bootstrap=2000,max_examples=8):
     """models: {label: checkpoint path}; reserves 'source' untrained baseline."""
     if not 0<detect<contrast<1 or bootstrap<0:
         raise ValueError('Invalid contrast/detection/bootstrap')
@@ -205,8 +268,16 @@ def study(test_file,models,contrast=.20,detect=.05,bootstrap=500,max_examples=8)
             gp=r.get('scene',{}).get('provenance',{}).get('overlap_group',r['scene_id'])
             if sha256(str(gp).encode()).hexdigest() in tr_groups:
                 raise ValueError('CBC test overlap group appeared in training checkpoint')
+        train_ids=sorted(model.meta.get('training_scene_sha256',[]))
+        train_digest=(sha256('\\n'.join(train_ids).encode()).hexdigest() if train_ids else None)
+        training_meta={key:model.meta.get(key) for key in (
+            'epochs','optimizer_updates_per_epoch','optimizer_updates_total',
+            'active_parameter_count','total_parameter_count','seed','contrast_weight',
+            'contrastive_scenes_per_epoch','contrastive_pairs_per_epoch','contrast_threshold')}
+        training_meta['training_scene_set_sha256']=train_digest
         checksums[name]={'checkpoint_sha256':sha256(Path(checkpoint).read_bytes()).hexdigest(),
-                         'model_variant':model.variant}
+                         'model_variant':model.variant,
+                         'training_meta':training_meta}
         predictions[name]=[record_with_new_predictions(r,model)['predicted'] for r in records]
     details={name:[_score_prediction(row,p,contrast,detect) for row,p in zip(records,pred)]
              for name,pred in predictions.items()}
@@ -222,6 +293,10 @@ def study(test_file,models,contrast=.20,detect=.05,bootstrap=500,max_examples=8)
                    if 'full' in details and 'no_events' in details else {})
     paired_graph=(_bootstrap(details['anchor_graph'],details['anchor_full'],n_boot=bootstrap)
                    if 'anchor_graph' in details and 'anchor_full' in details else {})
+    paired_full_contrast=(_bootstrap(details['full_contrast'],details['full'],n_boot=bootstrap)
+                          if 'full_contrast' in details and 'full' in details else {})
+    paired_graph_contrast=(_bootstrap(details['anchor_graph_contrast'],details['anchor_graph'],n_boot=bootstrap)
+                           if 'anchor_graph_contrast' in details and 'anchor_graph' in details else {})
     # Return only bounded-size, predeclared examples. No raw trajectories,
     # no source-world tensor dump, and no train/calibration target records.
     cases=[]
@@ -246,6 +321,8 @@ def study(test_file,models,contrast=.20,detect=.05,bootstrap=500,max_examples=8)
             'paired_scene_bootstrap_method_minus_anchor_copy':paired_vs_anchor,
             'paired_scene_bootstrap_full_minus_no_events':paired_events,
             'paired_scene_bootstrap_anchor_graph_minus_anchor_full':paired_graph,
+            'paired_scene_bootstrap_full_contrast_minus_full':paired_full_contrast,
+            'paired_scene_bootstrap_anchor_graph_contrast_minus_anchor_graph':paired_graph_contrast,
             'source_worlds_per_candidate':records[0].get('source_worlds'),
             'reference_worlds_per_candidate':len(records[0]['audit_families'])*int(records[0]['audit_worlds_per_family']),
             'checkpoints':checksums,'interesting_test_cases_bounded':cases,

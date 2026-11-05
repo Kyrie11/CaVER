@@ -29,10 +29,10 @@ if [[ -f "$PWD/scripts/cbc_contract_audit.py" ]];then
       --output "$OUT/contract_audit_pretrain.json" >/dev/null
   fi
 fi
-EPOCHS="${EPOCHS:-35}"
-GRAPH_EPOCHS="${GRAPH_EPOCHS:-16}"
-BOOTSTRAP="${BOOTSTRAP:-600}"
-CONTRAST_WEIGHT="${CONTRAST_WEIGHT:-0.3}"
+EPOCHS="${EPOCHS:-65}"
+GRAPH_EPOCHS="${GRAPH_EPOCHS:-$EPOCHS}"
+BOOTSTRAP="${BOOTSTRAP:-2000}"
+CONTRAST_WEIGHT="${CONTRAST_WEIGHT:-0.10}"
 SEED="${SEED:-11}"
 if [[ "${ALLOW_UNMATCHED_EPOCHS:-0}" != "1" && "$GRAPH_EPOCHS" != "$EPOCHS" ]];then
   echo "ERROR: anchor_full and anchor_graph must use the same optimizer updates; set GRAPH_EPOCHS=EPOCHS or ALLOW_UNMATCHED_EPOCHS=1." >&2

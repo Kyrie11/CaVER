@@ -113,7 +113,7 @@ class GraphCascadeRiskHead(nn.Module):
 
     This is a trainable graph baseline, NOT a verified anchor-reuse oracle.
     """
-    def __init__(self,feature_dim,channels=24,event_pool=False):
+    def __init__(self,feature_dim,channels=16,event_pool=False):
         super().__init__()
         self.event_pool=bool(event_pool)
         self.graph=DelayedGraphEncoder(channels=channels)
