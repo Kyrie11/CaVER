@@ -1,3 +1,5 @@
+> **2026-11-05 CBC-first v2 提醒：本文件为上一版历史记录；最新版运行/评估以 [`CBC_FIRST_RUN_CN.md`](CBC_FIRST_RUN_CN.md) 与 [`CBC_V2_CODE_AUDIT_CN.md`](CBC_V2_CODE_AUDIT_CN.md) 为准。新的 `scripts/server_pipeline.sh` 是限额压缩 WOMD 的 CBC-first 脚本，不再导出无界的 `womd_training.jsonl`，也不联合宣布 DSE/TIV 已认证。**
+
 # Implementation status and non-negotiable publication gates
 
 **2026-11-04 NEW AUDIT OVERRIDES:** This older status table describes the original prototype. Read `AUDIT_REVISED_CN.md` and `EXECUTION_REVISED_CN.md` first. CBC now has a joint ego/union head and a standalone hybrid guard screen, and DSE now uses a plausible-safe LP regret rather than the older gated-only regret. The guard screen is NOT integrated into native reactive inference, the full delayed GNN is missing, and official end-to-end benchmark runs remain unverified. **

@@ -1,3 +1,5 @@
+> **2026-11-05 CBC-first v2 提醒：本文件为上一版历史记录；最新版运行/评估以 [`CBC_FIRST_RUN_CN.md`](CBC_FIRST_RUN_CN.md) 与 [`CBC_V2_CODE_AUDIT_CN.md`](CBC_V2_CODE_AUDIT_CN.md) 为准。新的 `scripts/server_pipeline.sh` 是限额压缩 WOMD 的 CBC-first 脚本，不再导出无界的 `womd_training.jsonl`，也不联合宣布 DSE/TIV 已认证。**
+
 # CaVER 修订版：完整执行手册（2026-11-04）
 
 > **适用范围**：这是对上传的 `interactive planning.tex` 与旧版 `CaVER.zip` 逐项核查后的**研究原型修订版**。现有代码提供可运行的合成机制、WOMD/nuPlan 观测读入、低保真候选反事实采样、CBC 风险预测、DSE 联合风险/选择判定与 TIV 离线查询审计。**未提供经过官方闭环验证的 CBC 全模型、Waymax/ReactSim 反应式驾驶规划器或真实道路安全证书。** 因缺乏你服务器的 `/data0` 数据，真实数据指令为待执行的预检/试验，**不可声称已跑通**。从项目 `CaVER/` 根目录运行全部命令。

@@ -1,3 +1,24 @@
+# CaVER — CBC-first v2 research harness (2026-11-05)
+
+**Start here: [`docs/CBC_FIRST_RUN_CN.md`](docs/CBC_FIRST_RUN_CN.md)** — 中文详尽指令，CARLA 独立 RPC 检查、WOMD 限额压缩导出、CBC 同意图边界风险排序消融、报告打包与真实物理/统计证据缺口。
+
+```bash
+python -m pip install -e '.[test]'
+python -m pytest -q
+MODE=pilot bash scripts/cbc_synthetic_study.sh
+# After real WOMD Scenario dependencies are present:
+MODE=pilot bash scripts/cbc_womd_pipeline.sh
+# Synthetic fourcar does not use Carla server:
+python -m caver.cli fourcar-challenge --output outputs/fourcar_challenge.json
+python -m caver.cli carla-check --host 127.0.0.1 --port 2000 --output outputs/carla_check.json
+```
+
+**Not a deployable real-road controller or complete official-reactive closed-loop reproduction.** In particular, CBC learned delayed graph is NOT the paper's independently verified guard-error envelope; DSE and TIV terminal after-query certification remain research gaps.
+
+See [`docs/CBC_V2_CODE_AUDIT_CN.md`](docs/CBC_V2_CODE_AUDIT_CN.md) for the code/paper audit. Legacy documents are kept for historical context and do not supersede v2 instructions.
+
+---
+
 # CaVER — 2026-11-04 audited research prototype
 
 **不是可部署自动驾驶安全控制器，也不是已经完成论文全部方法/实验的最终复现。**

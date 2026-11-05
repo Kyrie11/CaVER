@@ -1,3 +1,5 @@
+> **2026-11-05 CBC-first v2 提醒：本文件为上一版历史记录；最新版运行/评估以 [`CBC_FIRST_RUN_CN.md`](CBC_FIRST_RUN_CN.md) 与 [`CBC_V2_CODE_AUDIT_CN.md`](CBC_V2_CODE_AUDIT_CN.md) 为准。新的 `scripts/server_pipeline.sh` 是限额压缩 WOMD 的 CBC-first 脚本，不再导出无界的 `womd_training.jsonl`，也不联合宣布 DSE/TIV 已认证。**
+
 # CaVER 最新论文与旧 ZIP 工程的代码审计／实验路线（2026-11-04）
 
 本审计以用户上传的 `interactive planning.tex` **最新修订版**为规范，以 `CaVER.zip` 的代码为待修工程。旧版 `代码设计.md` 描述的是之前模型的交付范围，不能替代最新论文定义。此报告区分“已修改并通过无真实数据的单测”“已完成合成试验”和“尚未完成真实场景/官方模拟器验证”。

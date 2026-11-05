@@ -2,11 +2,11 @@
 from pathlib import Path
 from dataclasses import asdict
 from hashlib import sha256
-import json,math,time
+import json,math,time,gzip
 import numpy as np
 import torch
 from caver.sim.traffic import standard_fourcar,candidates,Action,sample_world,rollout
-from caver.models.cbc import all_downstream_pairs,pair_features,predict,predict_joint,coherent_project,training_loss,CascadeRiskHead,JointRiskHead,save,load
+from caver.models.cbc import FEATURES,all_downstream_pairs,pair_features,predict,predict_joint,coherent_project,training_loss,CascadeRiskHead,JointRiskHead,save,load
 from caver.validation.evidence import conformal_calibrate,Calibration,choose
 from caver.validation.tiv import propose,verify_source,query_features,learn_query_value
 
@@ -22,12 +22,144 @@ def make_scene(seed):
     sc.scene_id=f'synth-{seed:08d}'
     return sc
 
+
+
+def stress_scene(seed, config='configs/fourcar_challenge.json'):
+    """Pre-registered *stress law*: perturbs posthoc fixture before outcomes.
+
+    Never filter by realized contact/choice labels. RQ1 natural prevalence
+    must be computed on unselected WOMD, not on this synthetic stress law.
+    """
+    rng=np.random.default_rng(seed)
+    cfg=json.loads(Path(config).read_text())
+    sc=standard_fourcar()
+    lookup={a.agent_id:a for a in sc.agents}
+    for k,st in cfg['actors'].items():
+        for attr,value in st.items():
+            noise=1.8 if attr=='x' and k in ('E','C') else (.8 if attr=='x' else .4 if attr=='vx' else 0.)
+            setattr(lookup[k],attr,float(value)+float(rng.normal(0,noise)))
+    sc.scene_id=f'synth-stress-{seed:08d}'
+    sc.provenance.update({'stress_sampled_before_outcomes':True,
+       'stress_center':'POSTHOC_FROZEN_FOURCAR_FIXTURE',
+       'causal_scope':'SYNTHETIC_POLICY_CONDITIONAL_NOT_NATURAL_FREQUENCY'})
+    return sc.validate()
+
+
+def stress_actions():
+    return [Action('early',.5,1.6,1.8,accel_ramp_s=.40),
+            Action('late',1.9,3.,1.8,accel_ramp_s=.40),
+            Action('reference',9.,10.,0.,lane_offset=0.)]
+
 def _pair_target(rollouts,p):
     return [float(np.mean([r['contact'].get(p,0) for r in rollouts])),
             float(np.mean([r['min_clearance'].get(p,50.) for r in rollouts])),
             (float(np.mean([r['stop_slack_event'][p] for r in rollouts if r.get('stop_slack_valid',{}).get(p,False)]))
              if any(r.get('stop_slack_valid',{}).get(p,False) for r in rollouts) else 0.),
             float(np.mean([bool(r.get('stop_slack_valid',{}).get(p,False)) for r in rollouts]))]
+
+
+
+def action_match_audit(actions,source_by_action,ego_index,dt,
+                       position_scale=5.,speed_scale=4.,accel_scale=3.,
+                       d_max=1.8,task_diff_max=3.,jerk_limit=5.,acc_limit=3.,lateral_acc_limit=3.):
+    """Pre-outcome task/dynamics checks from PRESCRIBED ego controls only.
+
+    These statistics do not use other actors or reference contact labels.
+    Traffic-law and map-topology feasibility remain separately UNVERIFIED.
+    """
+    profiles={}
+    by_id={a.action_id:a for a in actions}
+    for a in actions:
+        tr=np.asarray(source_by_action[a.action_id][0]['trajectory'],float)[:,ego_index,:]
+        v=tr[:,2]
+        accel=np.diff(v)/dt
+        j=np.diff(accel)/dt
+        y=tr[:,1]
+        lat_acc=np.diff(y,n=2)/(dt*dt)
+        # Task cost deliberately independent of non-ego safety and audit outcomes.
+        task=float(-(tr[-1,0]-tr[0,0])/10. + .04*np.sum(accel**2)*dt)
+        profiles[a.action_id]={'progress_m':float(tr[-1,0]-tr[0,0]),
+            'task_cost_ex_ante':task,'max_abs_long_jerk_mps3':float(np.max(np.abs(j))) if len(j) else 0.,
+            'max_abs_long_accel_mps2':float(np.max(np.abs(accel))) if len(accel) else 0.,
+            'max_abs_lateral_accel_mps2':float(np.max(np.abs(lat_acc))) if len(lat_acc) else 0.,
+            'kinematics_feasible':bool((len(j)==0 or np.max(np.abs(j))<=jerk_limit+1e-4)
+                and (len(accel)==0 or np.max(np.abs(accel))<=acc_limit+1e-4)
+                and (len(lat_acc)==0 or np.max(np.abs(lat_acc))<=lateral_acc_limit+1e-4)),
+            'map_law_route_feasibility':'UNVERIFIED'}
+    matched={}
+    for i,a in enumerate(actions):
+        for b in actions[i+1:]:
+            ta=np.asarray(source_by_action[a.action_id][0]['trajectory'])[:,ego_index,:]
+            tb=np.asarray(source_by_action[b.action_id][0]['trajectory'])[:,ego_index,:]
+            va,vb=np.diff(ta[:,2])/dt,np.diff(tb[:,2])/dt
+            metric=float(np.mean(np.linalg.norm(ta[:,:2]-tb[:,:2],axis=-1)/position_scale
+                      +np.abs(ta[:,2]-tb[:,2])/speed_scale
+                      +np.r_[np.abs(va-vb)/accel_scale,0.]))
+            comparable=bool(abs(a.lane_offset-b.lane_offset)<.1
+                            and abs(a.lane_time-b.lane_time)<.1)
+            task_diff=abs(profiles[a.action_id]['task_cost_ex_ante']-
+                          profiles[b.action_id]['task_cost_ex_ante'])
+            pair_key='|'.join(sorted((a.action_id,b.action_id)))
+            matched[pair_key]={'same_maneuver_intent':comparable,'d_e':metric,
+                 'delta_e_max':d_max,'task_cost_difference':task_diff,
+                 'delta_J_max':task_diff_max,
+                 'kinematic_feasible_both':profiles[a.action_id]['kinematics_feasible']
+                                    and profiles[b.action_id]['kinematics_feasible'],
+                 'matched_kinematic_proxy':bool(comparable and metric<=d_max
+                     and task_diff<=task_diff_max and profiles[a.action_id]['kinematics_feasible']
+                     and profiles[b.action_id]['kinematics_feasible']),
+                 'lawful_route_match':'NOT_EVALUATED'}
+    return {'profiles':profiles,'pairs':matched,'computed_from':'PRESCRIBED_EGO_ONLY_PRE_REFERENCE_LABELS'}
+
+
+
+def paired_boundary_diagnostics(source_by_action,ref_by_action,pairs,actions,dt=.1):
+    """Ex-post paired-world diagnostics, deliberately *not* CBC input.
+
+    All differences use same latent world indexes per declared family. Audit
+    world labels are never touched by source temporal graph construction.
+    """
+    if not {'early','late'} <= set(a.action_id for a in actions):
+        return {}
+    result={}
+    for p in pairs:
+        src0=source_by_action['early'];src1=source_by_action['late']
+        ref0=ref_by_action['early'];ref1=ref_by_action['late']
+        def digest(xs,ys):
+            if len(xs)!=len(ys) or not xs:
+                raise ValueError('Pairing requires same latent sample count')
+            contact=[];guard_change=[];change_times=[]
+            for x,y in zip(xs,ys):
+                if x['world_seed']!=y['world_seed'] or x['family']!=y['family']:
+                    raise ValueError('Response latent coupling was not preserved across actions')
+                contact.append(int(x['contact'].get(p,0)!=y['contact'].get(p,0)))
+                change=False;onset=None
+                for agent in x['accelerations']:
+                    if agent=='E':continue  # ego response is the prescribed action
+                    ba=np.asarray(x['accelerations'][agent],float)<-.6
+                    bb=np.asarray(y['accelerations'][agent],float)<-.6
+                    disagree=np.flatnonzero(ba!=bb)
+                    if len(disagree):
+                        change=True
+                        onset=float(disagree[0])*dt if onset is None else min(onset,float(disagree[0])*dt)
+                guard_change.append(int(change))
+                if onset is not None:change_times.append(onset)
+            return {'contact_flip_rate':float(np.mean(contact)),
+                    'any_brake_guard_flip_rate':float(np.mean(guard_change)),
+                    'first_mode_disagreement_mean_s':float(np.mean(change_times)) if change_times else None,
+                    'n_paired_latent_worlds':len(xs)}
+        d0=src0[0]
+        a=np.asarray([z['min_clearance'].get(p,50.) for z in src0],float)
+        guarding=[]
+        for r in src0:
+            for agent,arr in r['accelerations'].items():
+                if agent!='E':
+                    guarding.extend(np.abs(np.asarray(arr,float)+.6).tolist())
+        result[p]={'source':digest(src0,src1),'reference':digest(ref0,ref1),
+             'anchor_min_abs_clearance_m':float(np.min(np.abs(a))) if len(a) else None,
+             'anchor_min_abs_brake_guard_mps2':float(np.min(guarding)) if guarding else None,
+             'event_sources':'PAIRED_STRUCTURAL_INTERVENTION_OUTCOME_LABELS_NOT_ONLINE_EVIDENCE'}
+    return result
 
 def paired_scene(scene,actions=None,source_family='delayed_idm',audit_families=('late_brake','conservative'),
                  source_worlds=4,audit_worlds=16,seed=0,model=None,source_policy=None):
@@ -37,12 +169,16 @@ def paired_scene(scene,actions=None,source_family='delayed_idm',audit_families=(
     joint transitions as observed individual causal frequencies.
     """
     actions=actions or candidates();pairs=all_downstream_pairs(scene)
-    source_by_action={};ref_by_action={};prediction={};reference={};diagnostics={}
+    source_by_action={};ref_by_action={};prediction={};reference={};diagnostics={};temporal={}
     # Same latent world seeds for all candidate actions within each family.
     for a in actions:
         src=[rollout(scene,a,sample_world(scene,seed+k,source_family),response_net=source_policy) for k in range(source_worlds)]
         ref=[rollout(scene,a,sample_world(scene,100000+seed+k,fam)) for fam in audit_families for k in range(audit_worlds)]
         source_by_action[a.action_id]=src;ref_by_action[a.action_id]=ref
+        # Encodes *source reactor predicted* time series only. Auditor target
+        # traces remain inaccessible to CBC at training/inference input time.
+        from caver.models.temporal import source_temporal_graph
+        temporal[a.action_id]=source_temporal_graph(scene,src)
         prediction[f'{a.action_id}/ego']=float(np.mean([r['ego_collision'] for r in src]))
         prediction[f'{a.action_id}/down']=float(np.mean([r['downstream_collision'] for r in src]))
         reference[f'{a.action_id}/ego']=float(np.mean([r['ego_collision'] for r in ref]))
@@ -54,58 +190,119 @@ def paired_scene(scene,actions=None,source_family='delayed_idm',audit_families=(
             diagnostics[f'{a.action_id}/{p}']={'features':x.tolist(),
                    'target':_pair_target(ref,p),'baseline':_pair_target(src,p)}
     prediction=coherent_project(prediction,[a.action_id for a in actions],pairs)
-    return {'scene_id':scene.scene_id,'scene':scene.to_json(),'source_family':source_family,'audit_families':list(audit_families),
+    matching=action_match_audit(actions,source_by_action,[x.agent_id for x in scene.agents].index(scene.ego_id),scene.dt)
+    boundary=paired_boundary_diagnostics(source_by_action,ref_by_action,pairs,actions,scene.dt)
+    record={'scene_id':scene.scene_id,'scene':scene.to_json(),'source_family':source_family,'audit_families':list(audit_families),
             'source_worlds':source_worlds,'audit_worlds_per_family':audit_worlds,
             'actions':[asdict(a) for a in actions],'pairs':pairs,'predicted':prediction,'audited':reference,
-            'diagnostics':diagnostics,'reference_label':'SIMULATOR_CONDITIONAL_ONLY'}
+            'diagnostics':diagnostics,'temporal':temporal,'candidate_matching':matching,
+            'boundary_diagnostics':boundary,
+            'reference_label':'SIMULATOR_CONDITIONAL_ONLY'}
+    if 'early' in record['temporal']:
+        from caver.models.anchor import build_anchor_view
+        record['anchor_view']=build_anchor_view(record,'early')
+    return record
 
-def fit_cbc(records,output,epochs=75,seed=11):
+def fit_cbc(records,output,epochs=75,seed=11,variant='full'):
     torch.manual_seed(seed)
     records=list(records)
     if any(r.get('experimental_split') not in ('train',None) for r in records):
         raise ValueError('CBC train data must not contain calibration/test rollouts')
     X=[];Y=[];scene_groups=[]
+    uses_anchor=variant.startswith('anchor_')
+    uses_graph=variant in ('graph','anchor_graph')
     for row in records:
         pairs=row['pairs']
+        if uses_anchor and 'anchor_view' not in row:
+            raise ValueError('Anchor model requires one-anchor source evidence')
         for a in [v['action_id'] for v in row['actions']]:
-            features=[row['diagnostics'][f'{a}/{p}']['features'] for p in pairs]
+            features=[(row['anchor_view']['candidate_features'][f'{a}/{p}'] if uses_anchor
+                       else row['diagnostics'][f'{a}/{p}']['features']) for p in pairs]
             if features:
                 scene_groups.append((torch.tensor(np.asarray(features,np.float32)),
                         torch.tensor([row['audited'][a+'/ego'],row['audited'][a+'/down']],dtype=torch.float32)))
-        for v in row['diagnostics'].values():X.append(v['features']);Y.append(v['target'])
+        for k,v in row['diagnostics'].items():
+            X.append(row['anchor_view']['candidate_features'][k] if uses_anchor else v['features'])
+            Y.append(v['target'])
     if len(X)<6 or len(scene_groups)<2:raise ValueError('Need >=6 pairs and >=2 joint candidate labels')
     X=torch.tensor(np.array(X,np.float32));Y=torch.tensor(np.array(Y,np.float32))
-    m=CascadeRiskHead();m.joint=JointRiskHead()
+    m=CascadeRiskHead(variant=variant);m.joint=JointRiskHead(suppress_events=(variant=='no_events'))
+    if uses_graph:
+        from caver.models.temporal import GraphCascadeRiskHead
+        m.graph_model=GraphCascadeRiskHead(len(FEATURES))
     opt=torch.optim.AdamW(m.parameters(),lr=1e-3,weight_decay=1e-4)
+    graph_groups=[]
+    if uses_graph:
+        for row in records:
+            for a in [v['action_id'] for v in row['actions']]:
+                pairs=row['pairs']
+                graph=(row['anchor_view']['candidate_temporal'][a] if uses_anchor
+                       else row.get('temporal',{}).get(a))
+                if not graph:
+                    raise ValueError('Graph variant requires source-only temporal traces in collected records')
+                features=torch.tensor([(row['anchor_view']['candidate_features'][f'{a}/{p}'] if uses_anchor
+                                        else row['diagnostics'][f'{a}/{p}']['features']) for p in pairs],dtype=torch.float32)
+                targets=torch.tensor([row['diagnostics'][f'{a}/{p}']['target'] for p in pairs],dtype=torch.float32)
+                joint=torch.tensor([row['audited'][a+'/ego'],row['audited'][a+'/down']],dtype=torch.float32)
+                graph_groups.append((features,targets,joint,graph,pairs))
     for ep in range(epochs):
         perm=torch.randperm(len(X));groups=torch.randperm(len(scene_groups)).tolist();losses=[]
-        for b in perm.split(128):
-            z=m(X[b]);loss=training_loss(z,Y[b]);opt.zero_grad();loss.backward();
-            torch.nn.utils.clip_grad_norm_(m.parameters(),3.);opt.step();losses.append(float(loss.detach()))
-        # Joint events are supervised from complete independent rollouts.
-        # Do NOT sum independent pair probabilities to create union labels.
-        for sidx in groups:
-            feat,y=scene_groups[sidx]
-            output_joint=m.joint(feat)
-            loss_joint=torch.nn.functional.binary_cross_entropy(output_joint.clamp(1e-6,1-1e-6),y)
-            opt.zero_grad();loss_joint.backward()
-            torch.nn.utils.clip_grad_norm_(m.parameters(),3.);opt.step()
-            losses.append(float(loss_joint.detach()))
+        if uses_graph:
+            for idx in torch.randperm(len(graph_groups)).tolist():
+                feat,y,joint,trace,pairs=graph_groups[idx]
+                pair_pred=m.graph_model(feat,trace,pairs)
+                joint_pred=m.joint(feat)
+                loss=training_loss(pair_pred,y)+torch.nn.functional.binary_cross_entropy(
+                    joint_pred.clamp(1e-6,1-1e-6),joint)
+                opt.zero_grad();loss.backward()
+                torch.nn.utils.clip_grad_norm_(m.parameters(),3.);opt.step()
+                losses.append(float(loss.detach()))
+        else:
+            for b in perm.split(128):
+                z=m(X[b]);loss=training_loss(z,Y[b]);opt.zero_grad();loss.backward();
+                torch.nn.utils.clip_grad_norm_(m.parameters(),3.);opt.step();losses.append(float(loss.detach()))
+            # Joint events are supervised from complete independent rollouts.
+            for sidx in groups:
+                feat,y=scene_groups[sidx]
+                output_joint=m.joint(feat)
+                loss_joint=torch.nn.functional.binary_cross_entropy(output_joint.clamp(1e-6,1-1e-6),y)
+                opt.zero_grad();loss_joint.backward()
+                torch.nn.utils.clip_grad_norm_(m.parameters(),3.);opt.step()
+                losses.append(float(loss_joint.detach()))
     save(m,output,{'training_scenes':len(records),'example_count':len(X),'joint_examples':len(scene_groups),
-                   'train_source':'simulator_reference','seed':seed,'slack_masked':True})
+                   'train_source':'simulator_reference','variant':variant,'seed':seed,'slack_masked':True,
+                   'prediction_source':'ONE_ANCHOR_REUSE' if uses_anchor else 'FULL_CANDIDATE_CONDITIONED_SOURCE',
+                   'training_scene_sha256':[sha256(r['scene_id'].encode()).hexdigest() for r in records],
+                   'training_group_sha256':[sha256(str(r.get('scene',{}).get('provenance',{}).get('overlap_group',r['scene_id'])).encode()).hexdigest() for r in records]})
     return {'output':str(output),'train_scenes':len(records),'pairs':len(X),
-            'joint_examples':len(scene_groups),'loss':float(np.mean(losses))}
+            'joint_examples':len(scene_groups),'variant':variant,'loss':float(np.mean(losses))}
 
 def record_with_new_predictions(row,model):
+    uses_anchor=getattr(model,'variant','').startswith('anchor_')
+    if uses_anchor and 'anchor_view' not in row:
+        raise ValueError('Anchor prediction needs frozen source anchor evidence')
     pred=dict(row['predicted'])
     diagnostics={k:dict(v) for k,v in row['diagnostics'].items()}
     names=[a['action_id'] for a in row['actions']]
+    if uses_anchor:
+        cached=row['anchor_view']['candidate_features']
+        for a in names:
+            for p in row['pairs']:
+                pred[f'{a}/{p}']=cached[f'{a}/{p}'][9]
     for a in names:
-        feat=[]
-        for pair in row['pairs']:
-            v=row['diagnostics'][f'{a}/{pair}']
-            feat.append(v['features'])
-            estimate=predict(model,v['features'])
+        feat=[(row['anchor_view']['candidate_features'][f'{a}/{pair}'] if uses_anchor
+               else row['diagnostics'][f'{a}/{pair}']['features']) for pair in row['pairs']]
+        graph=(row['anchor_view']['candidate_temporal'] if uses_anchor else row.get('temporal',{}))
+        if getattr(model,'variant',None) in ('graph','anchor_graph'):
+            if a not in graph:
+                raise ValueError('Graph predictor has no source temporal evidence')
+            with torch.no_grad():
+                outs=model.graph_model(torch.tensor(np.asarray(feat),dtype=torch.float32),
+                                       graph[a],row['pairs']).cpu().numpy()
+            estimates=[{'p':float(o[0]),'margin':float(o[1]),'slack':float(o[2])} for o in outs]
+        else:
+            estimates=[predict(model,v) for v in feat]
+        for pair,estimate in zip(row['pairs'],estimates):
             pred[f'{a}/{pair}']=estimate['p']
             diagnostics[f'{a}/{pair}']['cbc_margin_prediction_m']=estimate['margin']
             diagnostics[f'{a}/{pair}']['cbc_event_slack_prediction_m']=estimate['slack']
@@ -119,11 +316,11 @@ def record_with_new_predictions(row,model):
 
 def store_records(records,path):
     p=Path(path);p.parent.mkdir(parents=True,exist_ok=True)
-    with p.open('w') as f:
+    with (gzip.open(p,'wt',encoding='utf-8') if str(p).endswith('.gz') else p.open('w')) as f:
         for r in records:f.write(json.dumps(r,allow_nan=False,separators=(',',':'))+'\n')
 
 def read_records(path):
-    with open(path) as f:
+    with (gzip.open(path,'rt',encoding='utf-8') if str(path).endswith('.gz') else open(path)) as f:
         for ln in f:
             if ln.strip():yield json.loads(ln)
 

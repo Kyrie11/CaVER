@@ -1,0 +1,210 @@
+"""Paired, held-out, small-output CBC falsification study.
+
+Compares methods *on the same scene and independently simulated reference law*.
+All source temporal features are predicted by a source reactor; reference
+intervention labels are never model inputs. Both are synthetic unless an
+independently executed native simulator supplies the test records.
+"""
+from collections import Counter
+from hashlib import sha256
+from pathlib import Path
+import math
+import numpy as np
+
+from caver.experiment import read_records,record_with_new_predictions
+from caver.models.cbc import load,coherent_project
+
+
+def _avg(v):
+    return float(np.mean(v)) if v else None
+
+
+def _score_prediction(row, predicted, threshold, detection):
+    """Only kinematic/maneuver-matched comparisons enter the critical statistic."""
+    aud=row['audited'];names=[a['action_id'] for a in row['actions']]
+    if not ('early' in names and 'late' in names):
+        return {'matched':0,'critical':[],'resolved':[],'pair_errors':[],
+                'down_errors':[],'regret':None,'event':[],'pair_errors_near':[],
+                'pair_errors_far':[],'risk_reversal':False,'ego_safe':False}
+    match=row.get('candidate_matching',{}).get('pairs',{}).get('early|late',{})
+    eligible=bool(match.get('matched_kinematic_proxy',False))
+    n=len(row.get('audit_families',[]))*int(row.get('audit_worlds_per_family',0))
+    # Paired binary differences in [-1,+1]. Hoeffding bound on the reference
+    # sample difference (not a CI for a real driver population).
+    radius=math.sqrt(2*math.log(40.)/n) if n>0 else math.inf
+    a,b='early','late'
+    ego_safe=(aud[f'{a}/ego']<=.05 and aud[f'{b}/ego']<=.05)
+    risk_reversal=eligible and ego_safe and abs(aud[f'{a}/down']-aud[f'{b}/down'])>=threshold
+    pairs=[];errors=[];near=[];far=[];events=[]
+    for p in row['pairs']:
+        true=float(aud[f'{a}/{p}']-aud[f'{b}/{p}'])
+        est=float(predicted[f'{a}/{p}']-predicted[f'{b}/{p}'])
+        if eligible and abs(true)>=threshold:
+            events.append({'pair':p,'true_delta':true,'estimate':est,
+                           'sign_error':float((est*true)<=0 or abs(est)<detection),
+                           'underresolution':float(abs(est)<detection),
+                           'reference_sign_resolved':bool(abs(true)>radius),
+                           'reference_mc_radius':radius})
+        for name in names:
+            key=f'{name}/{p}'
+            e=abs(float(predicted[key])-float(aud[key]))
+            errors.append(e)
+            d=row.get('boundary_diagnostics',{}).get(p,{})
+            dist=d.get('anchor_min_abs_clearance_m')
+            if dist is not None:
+                (near if dist<=2. else far).append(e)
+        bd=row.get('boundary_diagnostics',{}).get(p,{})
+        if bd:
+            pairs.append({'pair':p,'reference_contact_flip':bd['reference']['contact_flip_rate'],
+                          'source_contact_flip':bd['source']['contact_flip_rate'],
+                          'ref_guard_flip':bd['reference']['any_brake_guard_flip_rate'],
+                          'anchor_abs_clearance':bd['anchor_min_abs_clearance_m'],
+                          'anchor_abs_guard':bd['anchor_min_abs_brake_guard_mps2']})
+    down_errors=[abs(float(predicted[f'{name}/down'])-float(aud[f'{name}/down'])) for name in names]
+    regret=None
+    if eligible and ego_safe:
+        # Safety *ranking only*: not a complete task-cost planning decision.
+        choice=min((a,b),key=lambda name:(predicted[f'{name}/down'],name))
+        regret=float(aud[f'{choice}/down']-min(aud[f'{a}/down'],aud[f'{b}/down']))
+    return {'matched':int(eligible),'critical':events,'resolved':[x for x in events if x['reference_sign_resolved']],
+            'pair_errors':errors,'down_errors':down_errors,'regret':regret,
+            'event':pairs,'pair_errors_near':near,'pair_errors_far':far,
+            'risk_reversal':risk_reversal,'ego_safe':ego_safe}
+
+
+def _aggregate(rows):
+    critical=[c for r in rows for c in r['critical']]
+    resolved=[c for r in rows for c in r['resolved']]
+    errors=[x for r in rows for x in r['pair_errors']]
+    reg=[r['regret'] for r in rows if r['regret'] is not None]
+    pairs=[p for r in rows for p in r['event']]
+    hits=[p for p in pairs if p['reference_contact_flip']>0]
+    return {'scenes':len(rows),'matched_kinematic_proxy_scenes':sum(r['matched'] for r in rows),
+        'matched_ego_safe_scenes':sum(int(r['matched'] and r['ego_safe']) for r in rows),
+        'matched_downstream_contrast_scenes':sum(int(r['risk_reversal']) for r in rows),
+        'critical_pair_tests':len(critical),'critical_pair_ref_sign_resolved':len(resolved),
+        'critical_pair_sign_error_rate':_avg([x['sign_error'] for x in critical]),
+        'reference_resolved_sign_error_rate':_avg([x['sign_error'] for x in resolved]),
+        'critical_pair_underresolution_rate':_avg([x['underresolution'] for x in critical]),
+        'pair_reference_risk_mae':_avg(errors),
+        'near_boundary_pair_risk_mae':_avg([x for r in rows for x in r['pair_errors_near']]),
+        'far_boundary_pair_risk_mae':_avg([x for r in rows for x in r['pair_errors_far']]),
+        'downstream_union_reference_risk_mae':_avg([x for r in rows for x in r['down_errors']]),
+        'matched_ego_safe_safety_ranking_regret':_avg(reg),
+        'matched_ego_safe_safety_ranking_n':len(reg),
+        'reference_any_pair_contact_flip_n':len(hits),
+        'source_contact_flip_missed_reference_fraction':_avg([
+            float(p['source_contact_flip']==0.) for p in hits]),
+        'anchor_clearance_gt_2m_among_ref_flips_fraction':_avg([
+            float(p['anchor_abs_clearance']>2.) for p in hits if p['anchor_abs_clearance'] is not None]),
+        'boundary_warning':'Near=predicted anchor |clearance|<=2 m, not a validated physical guard interval'}
+
+
+def _bootstrap(d1,d0,seed=51,n_boot=500):
+    if len(d1)!=len(d0) or len(d1)<2:
+        return {}
+    rng=np.random.default_rng(seed);n=len(d1)
+    keys=('critical_pair_sign_error_rate','reference_resolved_sign_error_rate',
+          'matched_ego_safe_safety_ranking_regret','pair_reference_risk_mae',
+          'downstream_union_reference_risk_mae')
+    samples={k:[] for k in keys}
+    for _ in range(n_boot):
+        idx=rng.integers(0,n,n)
+        a=_aggregate([d1[i] for i in idx]);b=_aggregate([d0[i] for i in idx])
+        for k in keys:
+            if a[k] is not None and b[k] is not None:
+                samples[k].append(a[k]-b[k])
+    return {k:{'delta_method_minus_source':float(np.mean(v)),
+               'bootstrap_95pct_ci':[float(np.quantile(v,.025)),float(np.quantile(v,.975))],
+               'resamples_valid':len(v)} for k,v in samples.items() if v}
+
+
+def study(test_file,models,contrast=.20,detect=.05,bootstrap=500,max_examples=8):
+    """models: {label: checkpoint path}; reserves 'source' untrained baseline."""
+    if not 0<detect<contrast<1 or bootstrap<0:
+        raise ValueError('Invalid contrast/detection/bootstrap')
+    records=list(read_records(test_file))
+    if not records or any(r.get('experimental_split')!='test' for r in records):
+        raise ValueError('CBC study requires frozen held-out --split test records')
+    if len({r['scene_id'] for r in records})!=len(records):
+        raise ValueError('Duplicate test scene')
+    if len({tuple(r['audit_families']) for r in records})!=1:
+        raise ValueError('Multiple reference-law definitions within test')
+    models={'source':None,**models}
+    predictions={};checksums={}
+    # True one-anchor-only fast-reuse baseline: no candidate-conditioned reactor
+    # prediction for any non-anchor action. Its limitations are measurable.
+    anchor_copy=[]
+    for r in records:
+        view=r.get('anchor_view')
+        if not view:raise ValueError('Test record lacks saved one-anchor evidence')
+        pred={}
+        for a in [x['action_id'] for x in r['actions']]:
+            feats=[view['candidate_features'][f'{a}/{p}'] for p in r['pairs']]
+            for p,feat in zip(r['pairs'],feats):pred[f'{a}/{p}']=float(feat[9])
+            pred[f'{a}/down']=float(feats[0][15])
+            pred[f'{a}/ego']=float(feats[0][16])
+        anchor_copy.append(coherent_project(pred,[a['action_id'] for a in r['actions']],r['pairs']))
+    predictions['anchor_copy']=anchor_copy
+    for name,checkpoint in models.items():
+        if name in ('source','anchor_copy') and checkpoint is not None:raise ValueError('source/anchor_copy are reserved baseline names')
+        if checkpoint is None:
+            predictions[name]=[r['predicted'] for r in records]
+            continue
+        model=load(checkpoint)
+        tr_ids=set(model.meta.get('training_scene_sha256',[]))
+        tr_groups=set(model.meta.get('training_group_sha256',[]))
+        for r in records:
+            if sha256(r['scene_id'].encode()).hexdigest() in tr_ids:
+                raise ValueError('CBC test scene directly appeared in training checkpoint')
+            gp=r.get('scene',{}).get('provenance',{}).get('overlap_group',r['scene_id'])
+            if sha256(str(gp).encode()).hexdigest() in tr_groups:
+                raise ValueError('CBC test overlap group appeared in training checkpoint')
+        checksums[name]={'checkpoint_sha256':sha256(Path(checkpoint).read_bytes()).hexdigest(),
+                         'model_variant':model.variant}
+        predictions[name]=[record_with_new_predictions(r,model)['predicted'] for r in records]
+    details={name:[_score_prediction(row,p,contrast,detect) for row,p in zip(records,pred)]
+             for name,pred in predictions.items()}
+    aggregates={name:_aggregate(d) for name,d in details.items()}
+    paired={name:_bootstrap(d,details['source'],n_boot=bootstrap) for name,d in details.items() if name!='source'}
+    # Critical counterfactual controls for the *incremental* CBC claim:
+    # an anchor-only graph must beat the no-adjustment anchor-copy at the
+    # same single-anchor rollout budget. An event-feature head must beat the
+    # matched full-model capacity control, not just the source reactor.
+    paired_vs_anchor={name:_bootstrap(d,details['anchor_copy'],n_boot=bootstrap)
+                      for name,d in details.items() if name not in ('anchor_copy','source')}
+    paired_events=(_bootstrap(details['full'],details['no_events'],n_boot=bootstrap)
+                   if 'full' in details and 'no_events' in details else {})
+    # Return only bounded-size, predeclared examples. No raw trajectories,
+    # no source-world tensor dump, and no train/calibration target records.
+    cases=[]
+    for i,r in enumerate(records):
+        base=details['source'][i]
+        if not (base['critical'] or base['risk_reversal']):continue
+        p=next((p for p in base['critical'] if p['pair']=='B|C'),None)
+        cases.append({'scene_id':r['scene_id'], 'matched_proxy':bool(base['matched']),
+                      'reference_risk_early_late':{
+                          'early':r['audited'].get('early/down'),
+                          'late':r['audited'].get('late/down')},
+                      'BC_reference_pair_delta':p['true_delta'] if p else None,
+                      'source_predicted_pair_delta':p['estimate'] if p else None})
+        if len(cases)>=max_examples:break
+    return {'protocol':'CBC_HELDOUT_SIMULATOR_CONDITIONAL_FALSIFICATION_V1',
+            'test_file_sha256':sha256(Path(test_file).read_bytes()).hexdigest(),
+            'test_scenes':len(records),'reference_families':records[0]['audit_families'],
+            'reference_worlds_per_family':records[0]['audit_worlds_per_family'],
+            'critical_pair_abs_delta_threshold':contrast,'predicted_detection_threshold':detect,
+            'methods':aggregates,'paired_scene_bootstrap_method_minus_source':paired,
+            'paired_scene_bootstrap_method_minus_anchor_copy':paired_vs_anchor,
+            'paired_scene_bootstrap_full_minus_no_events':paired_events,
+            'source_worlds_per_candidate':records[0].get('source_worlds'),
+            'reference_worlds_per_candidate':len(records[0]['audit_families'])*int(records[0]['audit_worlds_per_family']),
+            'checkpoints':checksums,'interesting_test_cases_bounded':cases,
+            'identification_and_claim_limits':[
+                'Reference outcomes are finite-MC model-conditional means, not human potential outcomes',
+                'Training and reference reactors are distinct model families but are synthetic unless explicitly replaced',
+                'Kinematic candidate matching does NOT verify map-law compliance or physical prefix safety',
+                'Source reactor already runs candidate-conditioned full rollouts: this study has not yet benchmarked CBC anchor-reuse speedup',
+                'Graph head is time-causal but physical guard envelope completeness is UNVERIFIED',
+                'Paired bootstrap quantifies sampling across held-out test scenes, not unseen domain shifts',
+                'If resolved critical pair count is zero, risk ranking evidence is not publication-conclusive']}

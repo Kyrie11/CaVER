@@ -17,6 +17,17 @@ def parser():
     s=sub.add_parser('doctor');s.add_argument('--output')
     s=sub.add_parser('womd-check');s.add_argument('--decode',type=int,default=0);s.add_argument('--split',default='training');s.add_argument('--format',choices=['scenario','tf_example'],default='scenario');s.add_argument('--output')
     s=sub.add_parser('womd-export');s.add_argument('--split',default='training');s.add_argument('--format',choices=['scenario','tf_example'],default='scenario');s.add_argument('--limit',type=int,default=30);s.add_argument('--output',required=True)
+    s=sub.add_parser('womd-prep',help='Bounded streaming planning-only WOMD preparation')
+    s.add_argument('--split',choices=['training','validation'],required=True)
+    s.add_argument('--partition',choices=['train','calibration','test'],required=True)
+    s.add_argument('--purpose',choices=['policy','corridor'],default='corridor')
+    s.add_argument('--limit',type=int,default=120)
+    s.add_argument('--max-scan',type=int,default=40000)
+    s.add_argument('--max-shards',type=int,default=100)
+    s.add_argument('--per-shard',type=int,default=400)
+    s.add_argument('--shard-seed',type=int,default=17)
+    s.add_argument('--max-output-mb',type=float,default=45.)
+    s.add_argument('--output',required=True,help='MUST end in .jsonl.gz')
     s=sub.add_parser('waymax-read');s.add_argument('--split',default='training');s.add_argument('--limit',type=int,default=2);s.add_argument('--output',required=True)
     s=sub.add_parser('nuplan-check');s.add_argument('--split');s.add_argument('--db',help='Optional one DB strict schema audit');s.add_argument('--output')
     s=sub.add_parser('nuplan-export');s.add_argument('--db',required=True);s.add_argument('--map-root');s.add_argument('--limit',type=int,default=10);s.add_argument('--output',required=True)
@@ -26,14 +37,30 @@ def parser():
     s=sub.add_parser('fourcar-challenge');s.add_argument('--config',default='configs/fourcar_challenge.json');s.add_argument('--output',required=True)
     s=sub.add_parser('fourcar-mediation');s.add_argument('--out',required=True);s.add_argument('--seed',type=int,default=10);s.add_argument('--world-seed',type=int,default=10);s.add_argument('--family',default='late_brake')
     s=sub.add_parser('fourcar-scan');s.add_argument('--out',required=True);s.add_argument('--scenes',type=int,default=100);s.add_argument('--worlds',type=int,default=3);s.add_argument('--seed',type=int,default=100)
-    s=sub.add_parser('collect');s.add_argument('--source',choices=['synthetic','womd-jsonl','nuplan-jsonl'],default='synthetic');s.add_argument('--input');s.add_argument('--split',choices=['train','calibration','test'],required=True);s.add_argument('--scenes',type=int,default=20);s.add_argument('--source-worlds',type=int,default=4);s.add_argument('--audit-worlds',type=int,default=16);s.add_argument('--checkpoint');s.add_argument('--source-family',choices=['delayed_idm','learned_logged'],default='delayed_idm');s.add_argument('--policy-checkpoint');s.add_argument('--output',required=True)
-    s=sub.add_parser('train-cbc');s.add_argument('--input',required=True);s.add_argument('--epochs',type=int,default=80);s.add_argument('--output',required=True)
+    s=sub.add_parser('collect');s.add_argument('--source',choices=['synthetic','synthetic-stress','womd-jsonl','nuplan-jsonl'],default='synthetic');s.add_argument('--input');s.add_argument('--split',choices=['train','calibration','test'],required=True);s.add_argument('--scenes',type=int,default=20);s.add_argument('--source-worlds',type=int,default=4);s.add_argument('--audit-worlds',type=int,default=16);s.add_argument('--checkpoint');s.add_argument('--source-family',choices=['delayed_idm','learned_logged','stress_source'],default='delayed_idm');s.add_argument('--policy-checkpoint');s.add_argument('--output',required=True)
+    s=sub.add_parser('train-cbc');s.add_argument('--input',required=True);s.add_argument('--variant',choices=['full','no_events','graph','anchor_full','anchor_graph'],default='full');s.add_argument('--epochs',type=int,default=80);s.add_argument('--output',required=True)
+    s=sub.add_parser('cbc-study',help='Compact held-out CBC baseline/ablation comparison')
+    s.add_argument('--input',required=True)
+    s.add_argument('--model',action='append',default=[],help='label=checkpoint.pt; repeat')
+    s.add_argument('--contrast',type=float,default=.2)
+    s.add_argument('--detect',type=float,default=.05)
+    s.add_argument('--bootstrap',type=int,default=400)
+    s.add_argument('--output',required=True)
+    s=sub.add_parser('cbc-boundary-study',help='Empirical non-certified anchor reuse screen')
+    s.add_argument('--development',required=True);s.add_argument('--test',required=True)
+    s.add_argument('--target-miss',type=float,default=.05);s.add_argument('--output',required=True)
+    s=sub.add_parser('cbc-gate',help='Conservative evidence-adequacy report; not a safety certificate')
+    s.add_argument('--study',required=True);s.add_argument('--boundary');s.add_argument('--output',required=True)
+    s.add_argument('--min-resolved',type=int,default=30)
+    s.add_argument('--min-matched',type=int,default=50)
+    s.add_argument('--min-scenes',type=int,default=100)
     s=sub.add_parser('calibrate');s.add_argument('--input',required=True);s.add_argument('--checkpoint');s.add_argument('--alpha',type=float,default=.1);s.add_argument('--output',required=True)
     s=sub.add_parser('rq-audit');s.add_argument('--input',required=True);s.add_argument('--checkpoint');s.add_argument('--output',required=True);s.add_argument('--contrast',type=float,default=.2)
     s=sub.add_parser('evaluate');s.add_argument('--input',required=True);s.add_argument('--checkpoint');s.add_argument('--calibration');s.add_argument('--eps-ego',type=float,default=.08);s.add_argument('--eps-down',type=float,default=.12);s.add_argument('--eps-inc',type=float,default=.1);s.add_argument('--eps-reg',type=float,default=1.5);s.add_argument('--surrogate-prefix-check',action='store_true',help='Simulation-only prefix check assumption; NOT a physical field certificate');s.add_argument('--output',required=True)
     s=sub.add_parser('audit-splits');s.add_argument('--train',required=True);s.add_argument('--calibration',required=True);s.add_argument('--test',required=True);s.add_argument('--output',required=True)
     s=sub.add_parser('tiv-audit');s.add_argument('--input',required=True);s.add_argument('--output',required=True);s.add_argument('--head',required=True);s.add_argument('--epochs',type=int,default=120);s.add_argument('--budget',type=float,default=12.)
-    s=sub.add_parser('carla-run');s.add_argument('--town',default='Town04');s.add_argument('--out',required=True);s.add_argument('--step',type=float,default=.05);s.add_argument('--horizon',type=float,default=8.)
+    s=sub.add_parser('carla-check');s.add_argument('--host');s.add_argument('--port',type=int);s.add_argument('--timeout',type=float,default=8.);s.add_argument('--output')
+    s=sub.add_parser('carla-run');s.add_argument('--host');s.add_argument('--port',type=int);s.add_argument('--town',default='Town04');s.add_argument('--out',required=True);s.add_argument('--step',type=float,default=.05);s.add_argument('--horizon',type=float,default=8.)
     return p
 
 def run(args):
@@ -60,6 +87,13 @@ def run(args):
     elif args.cmd=='womd-export':
         from caver.data.womd import export
         report(export(cfg.womd,args.format,args.split,args.output,args.limit))
+    elif args.cmd=='womd-prep':
+        from caver.data.preparation import prepare_womd
+        result=prepare_womd(cfg.womd,args.split,args.partition,args.purpose,args.output,
+                            limit=args.limit,max_scan=args.max_scan,
+                            shard_seed=args.shard_seed,max_shards=args.max_shards,
+                            per_shard=args.per_shard,max_output_mb=args.max_output_mb)
+        report(result)
     elif args.cmd=='waymax-read':
         from caver.integrations.waymax_bridge import load_waymax_states,normalize_waymax_state
         from caver.data.schema import write_jsonl
@@ -134,7 +168,7 @@ def run(args):
         report({'searched':args.scenes*2*args.worlds,'positive_synthetic_cases':len(results),
                 'examples':results[:30],'posthoc_search':True,'independent_confirmation':False},args.out)
     elif args.cmd=='collect':
-        from caver.experiment import paired_scene,synthetic_records,store_records,make_scene
+        from caver.experiment import paired_scene,synthetic_records,store_records,make_scene,stress_scene,stress_actions
         from caver.models.cbc import load
         from caver.data.schema import read_jsonl
         from caver.data.corridor import corridor_subset
@@ -146,7 +180,12 @@ def run(args):
             from caver.models.policy import load_logged_policy
             policy=load_logged_policy(args.policy_checkpoint)
         seeds={'train':10000,'calibration':300000,'test':600000}
-        if args.source=='synthetic':scenes=(make_scene(seeds[args.split]+i) for i in range(args.scenes)); stats={'input':'SYNTHETIC_ONLY'}
+        if args.source=='synthetic':
+            scenes=(make_scene(seeds[args.split]+i) for i in range(args.scenes))
+            stats={'input':'SYNTHETIC_ONLY'}
+        elif args.source=='synthetic-stress':
+            scenes=(stress_scene(seeds[args.split]+i) for i in range(args.scenes))
+            stats={'input':'PREDECLARED_SYNTHETIC_STRESS_NOT_NATURAL_PREVALENCE'}
         else:
             if not args.input:raise ValueError('Source needs --input JSONL')
             def filter_scenes():
@@ -167,21 +206,55 @@ def run(args):
                             if partition(sc)!=args.split:continue
                     if kept>=args.scenes:break
                     scanned+=1
-                    c,reason=corridor_subset(sc)
+                    if sc.provenance.get('preparation_purpose')=='corridor':
+                        # Womd-prep already normalized its local frame. Running
+                        # corridor_subset again would rotate/reflect positions
+                        # twice and reject genuinely eligible prepared scenes.
+                        if sc.provenance.get('preparation_partition')!=args.split:
+                            raise ValueError('Prepared partition does not match collect --split')
+                        if (sc.provenance.get('corridor_filter')!='GEOMETRIC_NOT_MAP_CERTIFIED'
+                                or {a.agent_id for a in sc.agents}!={'E','A','B','C'}):
+                            raise ValueError('Prepared corridor roles are inconsistent')
+                        c=sc
+                    else:
+                        c,reason=corridor_subset(sc)
                     if c is not None:
                         kept+=1;yield c
                 if kept==0:raise ValueError(f'Zero eligible four-car corridor scenes in {scanned} input scenes')
             scenes=filter_scenes();stats={'input':args.input,'eligibility':'GEOMETRIC_ONLY'}
-        rec=[paired_scene(sc,source_family=args.source_family,source_worlds=args.source_worlds,audit_worlds=args.audit_worlds,
-                          seed=seeds[args.split]+i*73,model=model,source_policy=policy) for i,sc in enumerate(scenes)]
+        if args.source=='synthetic-stress' and args.source_family=='learned_logged':
+            raise ValueError('Synthetic stress requires a named non-logged surrogate source family')
+        audit_families=(('stress_reference','stress_shifted') if args.source=='synthetic-stress'
+                        else ('late_brake','conservative'))
+        rec=[paired_scene(sc,actions=stress_actions() if args.source=='synthetic-stress' else None,
+                          source_family=args.source_family,source_worlds=args.source_worlds,
+                          audit_families=audit_families,audit_worlds=args.audit_worlds,
+                          seed=seeds[args.split]+i*73,model=model,source_policy=policy)
+             for i,sc in enumerate(scenes)]
         for row in rec:row['experimental_split']=args.split
         store_records(rec,args.output)
         report({'split':args.split,'records':len(rec),'output':args.output,
-                'reference_families':['late_brake','conservative'],
+                'reference_families':list(audit_families),
                 'reference_type':'SIMULATED_NOT_REAL_CAUSAL_LABEL',**stats})
     elif args.cmd=='train-cbc':
         from caver.experiment import fit_cbc,read_records
-        report(fit_cbc(list(read_records(args.input)),args.output,epochs=args.epochs))
+        report(fit_cbc(list(read_records(args.input)),args.output,epochs=args.epochs,variant=args.variant))
+    elif args.cmd=='cbc-study':
+        from caver.validation.cbc_study import study
+        files={}
+        for expr in args.model:
+            if '=' not in expr:raise ValueError('Use --model LABEL=PATH')
+            name,path=expr.split('=',1)
+            if not name or name in ('source','anchor_copy') or not path or name in files:
+                raise ValueError('Duplicate or invalid CBC model label')
+            files[name]=path
+        report(study(args.input,files,args.contrast,args.detect,args.bootstrap),args.output)
+    elif args.cmd=='cbc-boundary-study':
+        from caver.validation.boundary_study import study
+        report(study(args.development,args.test,args.target_miss),args.output)
+    elif args.cmd=='cbc-gate':
+        from caver.validation.cbc_gate import summarize
+        report(summarize(args.study,args.boundary,args.min_resolved,args.min_matched,args.min_scenes),args.output)
     elif args.cmd=='calibrate':
         from caver.experiment import read_records,record_with_new_predictions
         from caver.models.cbc import load
@@ -264,9 +337,15 @@ def run(args):
         else:status={'trained':False,'reason':'Insufficient audited query labels'}
         report({'records':len(training),'audit':args.output,'head':status,
                 'warning':'Signed synthetic proxy acquisition targets only; no terminal release calibration or independent physical reference'})
+    elif args.cmd=='carla-check':
+        from caver.integrations.carla_runner import preflight
+        result=preflight(args.host or cfg.carla_host,args.port or cfg.carla_port,args.timeout)
+        report(result,args.output)
+        if not result['rpc_connected']:
+            raise RuntimeError('CARLA RPC connection failed; inspect carla-check report')
     elif args.cmd=='carla-run':
         from caver.integrations.carla_runner import run_server
-        report(run_server(cfg.carla_host,cfg.carla_port,args.town,args.out,step=args.step,horizon=args.horizon))
+        report(run_server(args.host or cfg.carla_host,args.port or cfg.carla_port,args.town,args.out,step=args.step,horizon=args.horizon))
     else:raise ValueError(args.cmd)
 
 def main(argv=None):

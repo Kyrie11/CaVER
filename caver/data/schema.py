@@ -2,6 +2,7 @@
 from dataclasses import dataclass, asdict
 from typing import Any
 import json
+import gzip
 import numpy as np
 
 @dataclass
@@ -50,14 +51,18 @@ class Scene:
     def from_json(cls, d):
         return cls(**{**d,'agents':[Agent(**a) for a in d['agents']]}).validate()
 
+def _open_text(path, mode):
+    """Gzip output is streamable and can be shared without recompression."""
+    return gzip.open(path,mode,encoding="utf-8") if str(path).endswith(".gz") else open(path,mode,encoding="utf-8")
+
 def write_jsonl(path, scenes):
     from pathlib import Path
     p=Path(path);p.parent.mkdir(parents=True,exist_ok=True)
-    with p.open('w') as f:
+    with _open_text(p,'wt') as f:
         for sc in scenes:f.write(json.dumps(sc.to_json(),separators=(',',':'))+'\n')
 
 def read_jsonl(path,limit=None):
-    with open(path) as f:
+    with _open_text(path,'rt') as f:
         for idx,line in enumerate(f):
             if limit is not None and idx>=limit:return
             if line.strip():yield Scene.from_json(json.loads(line))

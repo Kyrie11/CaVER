@@ -11,6 +11,9 @@ import numpy as np
 import torch
 from torch import nn
 
+EVENT_FEATURES=('source_event_stop_slack','source_slack_valid_fraction',
+                'source_follower_brake_onset','source_leader_brake_onset','path_hops')
+
 FEATURES=('initial_gap','initial_lateral','follower_speed','leader_speed',
  'ego_to_follower','ego_to_leader','pulse_begin','pulse_end','decel',
  'source_pair_contact','source_pair_clearance','source_event_stop_slack','source_slack_valid_fraction',
@@ -49,20 +52,28 @@ def all_downstream_pairs(scene):
 
 class CascadeRiskHead(nn.Module):
     """Physics-anchored event/boundary correction; no raw risk-score only head."""
-    def __init__(self,width=96):
+    def __init__(self,width=96,variant='full'):
         super().__init__()
+        if variant not in ('full','no_events','graph','anchor_full','anchor_graph'):
+            raise ValueError('Unknown CBC model variant')
+        self.variant=variant
         self.feature_norm=nn.LayerNorm(len(FEATURES))
         self.encoder=nn.Sequential(nn.Linear(len(FEATURES),width),nn.SiLU(),nn.Linear(width,width),nn.SiLU())
         self.output=nn.Linear(width,3) # contact logit correction, margin residual, stopping-slack residual
 
     def forward(self,x):
-        z=self.output(self.encoder(self.feature_norm(x)))
+        feature=x.clone()
+        if self.variant=='no_events':
+            # Keep source pair collision and clearance anchors, remove guard /
+            # stopping-slack / onset / path information in EVERY output head.
+            feature[...,list(map(FEATURES.index,EVENT_FEATURES))]=0.
+        z=self.output(self.encoder(self.feature_norm(feature)))
         # Baseline probability is source Monte Carlo contact. Avoid infinite logits.
         source=torch.clamp(x[...,FEATURES.index('source_pair_contact')],.005,.995)
         base_logit=torch.logit(source)
         probability=torch.sigmoid(base_logit+z[...,0])
         clearance=x[...,FEATURES.index('source_pair_clearance')]+z[...,1]
-        stopping=x[...,FEATURES.index('source_event_stop_slack')]+z[...,2]
+        stopping=feature[...,FEATURES.index('source_event_stop_slack')]+z[...,2]
         return torch.stack((probability,clearance,stopping),dim=-1)
 
 class JointRiskHead(nn.Module):
@@ -73,8 +84,9 @@ class JointRiskHead(nn.Module):
     ego/union means are physics anchors; gradients learn reference reactor
     corrections from independently sampled *joint* rollouts.
     """
-    def __init__(self, width=64):
+    def __init__(self, width=64, suppress_events=False):
         super().__init__()
+        self.suppress_events=bool(suppress_events)
         self.encoder=nn.Sequential(nn.LayerNorm(len(FEATURES)),nn.Linear(len(FEATURES),width),
                                    nn.SiLU(),nn.Linear(width,width),nn.SiLU())
         self.decoder=nn.Sequential(nn.Linear(width*2,width),nn.SiLU(),nn.Linear(width,2))
@@ -82,7 +94,10 @@ class JointRiskHead(nn.Module):
     def forward(self, x):
         if x.ndim!=2 or x.shape[0]<1 or x.shape[-1]!=len(FEATURES):
             raise ValueError('Expected [downstream_pairs,features] for one candidate')
-        z=self.encoder(x)
+        encoded=x.clone()
+        if self.suppress_events:
+            encoded[...,list(map(FEATURES.index,EVENT_FEATURES))]=0.
+        z=self.encoder(encoded)
         correction=self.decoder(torch.cat((z.mean(0),z.max(0).values),dim=-1))
         idx_ego=FEATURES.index('source_ego_contact')
         idx_down=FEATURES.index('source_downstream_union')
@@ -151,14 +166,19 @@ def predict(model,features):
 def save(model,path,meta=None):
     Path(path).parent.mkdir(parents=True,exist_ok=True)
     torch.save({'weights':model.state_dict(),'features':FEATURES,'meta':meta or {},
+                'variant':model.variant,'has_graph':hasattr(model,'graph_model'),
                 'has_joint_head':hasattr(model,'joint')},path)
 
 def load(path):
     try:record=torch.load(path,map_location='cpu',weights_only=True)
     except TypeError:record=torch.load(path,map_location='cpu')
     if tuple(record['features'])!=FEATURES:raise ValueError('CBC feature schema incompatible with checkpoint')
-    m=CascadeRiskHead()
+    variant=record.get('variant','full')
+    m=CascadeRiskHead(variant=variant)
+    if record.get('has_graph'):
+        from caver.models.temporal import GraphCascadeRiskHead
+        m.graph_model=GraphCascadeRiskHead(len(FEATURES))
     if record.get('has_joint_head'):
-        m.joint=JointRiskHead()
-    m.load_state_dict(record['weights']);m.eval()
+        m.joint=JointRiskHead(suppress_events=(variant=='no_events'))
+    m.load_state_dict(record['weights']);m.eval();m.meta=record.get('meta',{})
     return m

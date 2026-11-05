@@ -31,7 +31,7 @@ def inspect(root):
             for fmt in ('scenario', 'tf_example')}
 
 
-def _tfrecord(shards, limit=None):
+def _tfrecord(shards, limit=None, per_shard=None):
     try:
         import tensorflow as tf
     except ImportError as exc:
@@ -40,12 +40,16 @@ def _tfrecord(shards, limit=None):
     if limit is not None and limit < 1:
         raise ValueError('limit must be positive')
     for sh in shards:
+        in_shard = 0
         comp = 'GZIP' if sh.name.endswith('.gz') else ''
         for raw in tf.data.TFRecordDataset([str(sh)], compression_type=comp):
             yield raw.numpy(), str(sh)
             total += 1
+            in_shard += 1
             if limit is not None and total >= limit:
                 return
+            if per_shard is not None and in_shard >= per_shard:
+                break
 
 
 def _dims(length, width):
@@ -257,13 +261,23 @@ def parse_tf_example(raw, include_future=False):
     return sc, future
 
 
-def read(root, format='scenario', split='training', limit=None, with_future=False):
+def read(root, format='scenario', split='training', limit=None, with_future=False,
+         shard_seed=None, max_shards=None, per_shard=None):
     folder, shards = find_shards(root, format, split)
     if not shards:
         raise FileNotFoundError(f'No WOMD uncompressed {format}/{split} TFRecord shards in {folder}')
+    if shard_seed is not None:
+        # Uniform deterministic *shard-order* sampling, not a random scene sampler.
+        # Truncation within each shard remains a selection limitation.
+        rng = np.random.default_rng(int(shard_seed))
+        shards = [shards[int(i)] for i in rng.permutation(len(shards))]
+    if max_shards is not None:
+        if max_shards <= 0:raise ValueError('max_shards must be positive')
+        shards = shards[:max_shards]
+    if per_shard is not None and per_shard <= 0:raise ValueError('per_shard must be positive')
     parse = parse_scenario if format=='scenario' else parse_tf_example
     ids = set()
-    for raw, shard in _tfrecord(shards, limit):
+    for raw, shard in _tfrecord(shards, limit, per_shard):
         sc, labels = parse(raw, include_future=with_future)
         if sc.scene_id in ids:
             raise ValueError('Duplicate WOMD scenario ID; data mixed or duplicated: '+sc.scene_id)

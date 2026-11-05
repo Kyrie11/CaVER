@@ -20,13 +20,52 @@ def _prev_wp(wp,distance):
 def _profile_speed(action,t,base=13.):
     return max(0.,base-action.decel*max(0,min(t-action.pulse_begin,action.pulse_end-action.pulse_begin)))
 
+def preflight(host='127.0.0.1', port=2000, timeout=8.):
+    """Read-only CARLA 0.9.16 handshake. No load_world or world tick."""
+    import importlib.util
+    result={'host':host,'port':int(port),'python_module_found':bool(importlib.util.find_spec('carla')),
+            'rpc_connected':False,'current_map':None,'available_maps':[],
+            'client_version':None,'server_version':None,'version_match':None,
+            'hint':'fourcar-challenge is a synthetic surrogate; use carla-run for physical pilot'}
+    if not result['python_module_found']:
+        result['error']='Cannot import carla PythonAPI. Install client matching CARLA server 0.9.16.'
+        return result
+    try:
+        import carla
+        result['module_path']=getattr(carla,'__file__',None)
+        client=carla.Client(host,int(port))
+        client.set_timeout(float(timeout))
+        result['client_version']=client.get_client_version()
+        result['server_version']=client.get_server_version()
+        result['version_match']=result['client_version']==result['server_version']
+        world=client.get_world()
+        result['current_map']=world.get_map().name
+        result['available_maps']=client.get_available_maps()
+        result['rpc_connected']=True
+        result['vehicle_blueprint_count']=len(world.get_blueprint_library().filter('vehicle.*'))
+        result['spawn_count']=len(world.get_map().get_spawn_points())
+    except Exception as exc:
+        # Surface client version or PythonAPI mismatches, not an imaginary
+        # fourcar-challenge connection error.
+        result['error']=str(exc)[:600]
+        result['hint']='Check CARLA server process, TCP ports 2000/2001, local host vs remote host, and version matching.'
+    return result
+
+
 def run_server(host='127.0.0.1',port=2000,town='Town04',out='outputs/carla',seed=10,step=.05,horizon=8.):
     try:import carla
     except ImportError as exc:raise RuntimeError('CARLA Python egg/wheel not visible; source CARLA PythonAPI for installed server') from exc
     from caver.sim.traffic import candidates
+    handshake=preflight(host,port)
+    if not handshake['rpc_connected']:
+        raise RuntimeError('CARLA RPC not connected: '+handshake.get('error','unknown')+'; run caver carla-check')
+    if not handshake['version_match']:
+        raise RuntimeError('CARLA PythonAPI/server mismatch: '+str(handshake['client_version'])+' vs '+str(handshake['server_version']))
     client=carla.Client(host,int(port));client.set_timeout(15.)
     world=client.get_world()
     if world.get_map().name.split('/')[-1]!=town:
+        if not any(m.split('/')[-1]==town for m in handshake['available_maps']):
+            raise RuntimeError(f'CARLA map {town} is not installed. Available: {handshake["available_maps"]}')
         world=client.load_world(town)
     settings=world.get_settings()
     old_sync=settings.synchronous_mode;old_step=settings.fixed_delta_seconds
@@ -62,8 +101,21 @@ def run_server(host='127.0.0.1',port=2000,town='Town04',out='outputs/carla',seed
                 for k,a in roles.items():
                     bp=world.get_blueprint_library().find('sensor.other.collision')
                     sensor=world.spawn_actor(bp,carla.Transform(),attach_to=a);sensors.append(sensor)
-                    sensor.listen(lambda ev,k=k:contacts.append({'t':float(ev.timestamp),'a':k,'other_id':ev.other_actor.id}))
+                    sensor.listen(lambda ev,k=k,sink=contacts:sink.append({'t':float(ev.timestamp),'a':k,'other_id':ev.other_actor.id}))
+                # Explicitly prime similar initial traffic velocities for each
+                # action. This is only a repeatability control, not proof of
+                # matching the surrogate fixture or a physically equilibrated state.
+                nominal_speed={'E':13.,'A':13.,'B':15.,'C':15.5}
+                for role,actor in roles.items():
+                    yaw=math.radians(actor.get_transform().rotation.yaw)
+                    v=nominal_speed[role]
+                    actor.set_target_velocity(carla.Vector3D(v*math.cos(yaw),v*math.sin(yaw),0.))
                 world.tick()
+                initial_states={}
+                for role,actor in roles.items():
+                    loc=actor.get_location();vel=actor.get_velocity()
+                    initial_states[role]={'x':loc.x,'y':loc.y,'z':loc.z,
+                        'speed_mps':math.hypot(vel.x,vel.y)}
                 # Per-role delayed observations: this buffer includes location and speed,
                 # not solely a brake command. CARLA physical acceleration is measured.
                 traces=[];delays={'A':.2,'B':.45,'C':.75}
@@ -115,6 +167,8 @@ def run_server(host='127.0.0.1',port=2000,town='Town04',out='outputs/carla',seed
                     speed_ctl.steer=float(max(-.5,min(.5,cross/12.)))
                     E.apply_control(speed_ctl)
                     world.tick();traces.append({'t':t,'state':frames})
+                # Give asynchronous collision callbacks one synchronous tick to flush.
+                world.tick()
                 # Resolve collisions by the original actor role mapping; contact sensors
                 # can count the same event twice; deduplicate pair role identities.
                 pairs=set()
@@ -124,7 +178,8 @@ def run_server(host='127.0.0.1',port=2000,town='Town04',out='outputs/carla',seed
                 results.append({'action':action.action_id,'world_map':world.get_map().name,
                                 'contact_pairs':sorted(pairs),'ego_collision':any('E' in p.split('|') for p in pairs),
                                 'downstream_collision':any('E' not in p.split('|') for p in pairs),
-                                'traces':traces,'actual_carla_physics':True,'seed':seed})
+                                'traces':traces,'initial_states':initial_states,
+                                'actual_carla_physics':True,'seed':seed})
             finally:
                 for sensor in sensors:
                     sensor.stop();sensor.destroy()
@@ -137,5 +192,20 @@ def run_server(host='127.0.0.1',port=2000,town='Town04',out='outputs/carla',seed
         world.apply_settings(cfg)
     p=Path(out);p.mkdir(parents=True,exist_ok=True)
     (p/'carla_rollouts.json').write_text(json.dumps(results,indent=2))
-    return {'output':str(p/'carla_rollouts.json'),'actions':len(results),'verified':'CARLA_SERVER_EXECUTED',
-            'note':'No guarantee of matched dynamic initialization beyond spawn state; inspect traces and contacts'}
+    roles=('E','A','B','C')
+    parity={}
+    if results:
+        base=results[0]['initial_states']
+        for r in results[1:]:
+            parity[r['action']]={k:{'location_delta_m':math.hypot(r['initial_states'][k]['x']-base[k]['x'],
+                                                              r['initial_states'][k]['y']-base[k]['y']),
+                                     'speed_delta_mps':abs(r['initial_states'][k]['speed_mps']-base[k]['speed_mps'])}
+                                  for k in roles}
+    report={'output':str(p/'carla_rollouts.json'),'actions':len(results),'verified':'CARLA_SERVER_EXECUTED',
+            'handshake':{k:handshake[k] for k in ('client_version','server_version','current_map')},
+            'paired_initial_state_differences':parity,
+            'limitations':['Initial-state parity must be audited; this controller is not the frozen fourcar surrogate',
+                           'Sensors are asynchronous and physics contact does not certify causal attribution',
+                           'Spawned scripted controls are not independent driver response world models']}
+    (p/'carla_summary.json').write_text(json.dumps(report,indent=2))
+    return report

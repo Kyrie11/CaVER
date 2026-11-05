@@ -1,0 +1,131 @@
+"""Finite-horizon, delay-respecting *source-response* graph residual prototype.
+
+This network cannot implement the paper's physically validated event-boundary
+certificate. It uses only a declared source reactor's candidate-conditioned
+predictions, not logged ground-truth futures or the independent audit reactor.
+
+Graph edges are conservatively screened from CURRENT observed geometry; no
+learned importance weight can delete an upstream eligible directed edge.
+"""
+import math
+import numpy as np
+import torch
+from torch import nn
+
+TRACE_FEATURES=('rel_x','rel_y','speed','acceleration','brake_guard','delay')
+
+
+def source_temporal_graph(scene, rollouts, dt_sample=.4):
+    if not rollouts:
+        raise ValueError('No source rollouts for temporal graph')
+    ids=[a.agent_id for a in scene.agents]
+    actors={a.agent_id:a for a in scene.agents}
+    ego=actors[scene.ego_id]
+    raw=[]
+    # Symmetric aggregation: graph representation must not depend on the
+    # arbitrary order of Monte Carlo samples. Computing running means while
+    # creating traces would bias all earlier samples and break permutation
+    # invariance of the source-world empirical estimate.
+    delay_mean={k:float(np.mean([r.get('driver_delay_s',{}).get(k,0.)
+                                   for r in rollouts])) for k in ids}
+    for r in rollouts:
+        if list(r['actor_ids'])!=ids:
+            raise ValueError('Source actor order mismatch')
+        traj=np.asarray(r['trajectory'],float)
+        if traj.ndim!=3 or traj.shape[1:]!=(len(ids),6):
+            raise ValueError('Invalid source rollout trajectory')
+        if len(r['accelerations'][scene.ego_id])!=len(traj)-1:
+            raise ValueError('Source temporal acceleration length mismatch')
+        take=np.arange(0,len(traj),max(1,round(dt_sample/scene.dt)))
+        accel=np.zeros((len(traj),len(ids)),float)
+        for i,key in enumerate(ids):
+            a=np.asarray(r['accelerations'][key],float)
+            accel[:-1,i]=a
+            accel[-1,i]=a[-1] if len(a) else 0.
+        local=np.stack(((traj[take,:,0]-ego.x)/100.,
+                        (traj[take,:,1]-ego.y)/8.,
+                         traj[take,:,2]/30.,
+                         accel[take]/6.,
+                         (accel[take]+.6)/6.,
+                         np.tile([delay_mean[k] for k in ids],(len(take),1))/1.5),axis=-1)
+        raw.append(local)
+    nodes=np.mean(raw,axis=0)
+    if not np.all(np.isfinite(nodes)):
+        raise ValueError('Nonfinite source graph')
+    edges=[]
+    for i,send in enumerate(scene.agents):
+        for j,recv in enumerate(scene.agents):
+            if i==j or recv.agent_id==scene.ego_id:continue
+            dx=send.x-recv.x
+            dy=send.y-recv.y
+            # A source agent can influence a physically reachable follower;
+            # include ego even if an initial lane-change is required.
+            if -10. <= dx <= 125. and abs(dy) <= 9.:
+                receiver_delay=delay_mean[recv.agent_id]
+                lag=max(1,int(math.ceil(receiver_delay/dt_sample)))
+                edges.append([i,j,lag])
+    return {'actors':ids,'nodes':nodes.astype('float32').tolist(),
+            'edges':edges,'sample_dt':float(dt_sample),'source_only':True,
+            'edge_screen':'INITIAL_REACHABILITY_HEURISTIC_NOT_PHYSICAL_COMPLETENESS'}
+
+
+class DelayedGraphEncoder(nn.Module):
+    """Parallel strictly past-shifted message passing, no future-to-past paths."""
+    def __init__(self,channels=24,depth=2):
+        super().__init__()
+        self.input=nn.Linear(len(TRACE_FEATURES),channels)
+        self.msg=nn.ModuleList(nn.Linear(channels,channels,bias=False) for _ in range(depth))
+        self.update=nn.ModuleList(nn.Sequential(nn.Linear(channels*3,channels),nn.SiLU(),
+                                                 nn.Linear(channels,channels)) for _ in range(depth))
+        self.norm=nn.ModuleList(nn.LayerNorm(channels) for _ in range(depth))
+        self.channels=channels
+
+    def forward(self,nodes,edges):
+        if nodes.ndim!=3 or nodes.shape[-1]!=len(TRACE_FEATURES):
+            raise ValueError('Graph input must be [T, N, 6]')
+        T,N,_=nodes.shape
+        h=self.input(nodes)
+        for mp,update,norm in zip(self.msg,self.update,self.norm):
+            # Every edge uses t-lag, lag>=1. A perturbation in source time t
+            # cannot alter graph encodings at any earlier time.
+            agg=torch.zeros_like(h)
+            counts=torch.zeros((N,),device=h.device,dtype=h.dtype)
+            for a,b,lag in edges:
+                if not (0<=a<N and 0<=b<N and a!=b and lag>=1):
+                    raise ValueError('Invalid or noncausal directed edge')
+                if lag<T:
+                    agg[lag:,b,:]=agg[lag:,b,:]+mp(h[:-lag,a,:])
+                    counts[b]+=1.
+            agg=agg/counts.clamp_min(1.)[None,:,None]
+            prev=torch.cat((torch.zeros_like(h[:1]),h[:-1]),dim=0)
+            h=norm(h+update(torch.cat((h,prev,agg),dim=-1)))
+        return h
+
+
+class GraphCascadeRiskHead(nn.Module):
+    """Candidate-conditioned delayed graph correction to physical-anchor risks.
+
+    This is a trainable graph baseline, NOT a verified anchor-reuse oracle.
+    """
+    def __init__(self,feature_dim,channels=24):
+        super().__init__()
+        self.graph=DelayedGraphEncoder(channels=channels)
+        self.pair=nn.Sequential(nn.Linear(feature_dim+channels*3,64),nn.SiLU(),
+                                nn.Linear(64,64),nn.SiLU(),nn.Linear(64,3))
+
+    def forward(self,x,graph_data,pair_ids):
+        nodes=torch.as_tensor(graph_data['nodes'],dtype=x.dtype,device=x.device)
+        edges=graph_data['edges']
+        ids=graph_data['actors']
+        h=self.graph(nodes,edges).mean(dim=0)
+        # Shared time causal graph features for both selected pair roles and
+        # the scene-wide source response. Pair potential is order-independent.
+        globally=h.mean(dim=0)
+        vector=[]
+        for p in pair_ids:
+            i,j=(ids.index(q) for q in p.split('|'))
+            vector.append(torch.cat((h[i]+h[j],torch.abs(h[i]-h[j]),globally)))
+        z=self.pair(torch.cat((x,torch.stack(vector)),dim=-1))
+        source=x[:,9].clamp(.005,.995)
+        contact=torch.sigmoid(torch.logit(source)+z[:,0])
+        return torch.stack((contact,x[:,10]+z[:,1],x[:,11]+z[:,2]),dim=-1)
