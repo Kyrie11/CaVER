@@ -56,6 +56,16 @@ def parser():
     s.add_argument('--min-scenes',type=int,default=100)
     s=sub.add_parser('calibrate');s.add_argument('--input',required=True);s.add_argument('--checkpoint');s.add_argument('--alpha',type=float,default=.1);s.add_argument('--output',required=True)
     s=sub.add_parser('rq-audit');s.add_argument('--input',required=True);s.add_argument('--checkpoint');s.add_argument('--output',required=True);s.add_argument('--contrast',type=float,default=.2)
+    s=sub.add_parser('extended-audit',help='Critical-pair, reuse, timing, yield and stratified calibration audit')
+    s.add_argument('--input',required=True)
+    s.add_argument('--checkpoint',help='Optional CBC checkpoint; predictions are recomputed before auditing')
+    s.add_argument('--contrast',type=float,default=.2)
+    s.add_argument('--detect',type=float,default=.05)
+    s.add_argument('--bootstrap',type=int,default=2000)
+    s.add_argument('--seed',type=int,default=51)
+    s.add_argument('--reuse-clearance-multiplier',type=float)
+    s.add_argument('--reuse-guard-multiplier',type=float)
+    s.add_argument('--output',required=True)
     s=sub.add_parser('evaluate');s.add_argument('--input',required=True);s.add_argument('--checkpoint');s.add_argument('--calibration');s.add_argument('--eps-ego',type=float,default=.08);s.add_argument('--eps-down',type=float,default=.12);s.add_argument('--eps-inc',type=float,default=.1);s.add_argument('--eps-reg',type=float,default=1.5);s.add_argument('--surrogate-prefix-check',action='store_true',help='Simulation-only prefix check assumption; NOT a physical field certificate');s.add_argument('--output',required=True)
     s=sub.add_parser('audit-splits');s.add_argument('--train',required=True);s.add_argument('--calibration',required=True);s.add_argument('--test',required=True);s.add_argument('--output',required=True)
     s=sub.add_parser('tiv-audit');s.add_argument('--input',required=True);s.add_argument('--output',required=True);s.add_argument('--head',required=True);s.add_argument('--epochs',type=int,default=120);s.add_argument('--budget',type=float,default=12.)
@@ -287,6 +297,20 @@ def run(args):
         if args.checkpoint:
             model=load(args.checkpoint);rec=[record_with_new_predictions(r,model) for r in rec]
         report(rq_audit(rec,contrast_threshold=args.contrast),args.output)
+    elif args.cmd=='extended-audit':
+        from caver.experiment import read_records,record_with_new_predictions
+        from caver.models.cbc import load
+        from caver.validation.extended_metrics import extended_audit
+        rec=list(read_records(args.input))
+        if args.checkpoint:
+            model=load(args.checkpoint)
+            rec=[record_with_new_predictions(r,model) for r in rec]
+        result=extended_audit(
+            rec, contrast_threshold=args.contrast, detection_threshold=args.detect,
+            bootstrap=args.bootstrap, seed=args.seed,
+            reuse_clearance_multiplier=args.reuse_clearance_multiplier,
+            reuse_guard_multiplier=args.reuse_guard_multiplier)
+        report(result,args.output)
     elif args.cmd=='evaluate':
         from caver.experiment import read_records,record_with_new_predictions,evaluate
         from caver.models.cbc import load

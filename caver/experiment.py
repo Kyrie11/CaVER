@@ -169,11 +169,21 @@ def paired_scene(scene,actions=None,source_family='delayed_idm',audit_families=(
     joint transitions as observed individual causal frequencies.
     """
     actions=actions or candidates();pairs=all_downstream_pairs(scene)
+    # This transcript is intentionally scoped to record generation.  It is
+    # useful for finding which component dominates collection cost, but it is
+    # not an online planning-callback latency claim.  The online benchmark
+    # must capture the same fields at the planner callback boundary.
+    t_total=time.perf_counter(); source_ms=0.; reference_ms=0.; feature_ms=0.; model_ms=0.
+    source_calls=0; reference_calls=0
     source_by_action={};ref_by_action={};prediction={};reference={};diagnostics={};temporal={}
     # Same latent world seeds for all candidate actions within each family.
     for a in actions:
+        t0=time.perf_counter()
         src=[rollout(scene,a,sample_world(scene,seed+k,source_family),response_net=source_policy) for k in range(source_worlds)]
+        source_ms+=(time.perf_counter()-t0)*1000.; source_calls+=len(src)
+        t0=time.perf_counter()
         ref=[rollout(scene,a,sample_world(scene,100000+seed+k,fam)) for fam in audit_families for k in range(audit_worlds)]
+        reference_ms+=(time.perf_counter()-t0)*1000.; reference_calls+=len(ref)
         source_by_action[a.action_id]=src;ref_by_action[a.action_id]=ref
         # Encodes *source reactor predicted* time series only. Auditor target
         # traces remain inaccessible to CBC at training/inference input time.
@@ -184,8 +194,12 @@ def paired_scene(scene,actions=None,source_family='delayed_idm',audit_families=(
         reference[f'{a.action_id}/ego']=float(np.mean([r['ego_collision'] for r in ref]))
         reference[f'{a.action_id}/down']=float(np.mean([r['downstream_collision'] for r in ref]))
         for p in pairs:
+            t0=time.perf_counter()
             x=pair_features(scene,a,src,p)
+            feature_ms+=(time.perf_counter()-t0)*1000.
+            t0=time.perf_counter()
             prediction[f'{a.action_id}/{p}']=predict(model,x)['p']
+            model_ms+=(time.perf_counter()-t0)*1000.
             reference[f'{a.action_id}/{p}']=_pair_target(ref,p)[0]
             diagnostics[f'{a.action_id}/{p}']={'features':x.tolist(),
                    'target':_pair_target(ref,p),'baseline':_pair_target(src,p)}
@@ -201,6 +215,18 @@ def paired_scene(scene,actions=None,source_family='delayed_idm',audit_families=(
     if 'early' in record['temporal']:
         from caver.models.anchor import build_anchor_view
         record['anchor_view']=build_anchor_view(record,'early')
+    record['runtime']={
+        'scope':'OFFLINE_RECORD_COLLECTION_WALLCLOCK_NOT_ONLINE_PLANNING_LATENCY',
+        'total_ms':(time.perf_counter()-t_total)*1000.,
+        'source_ms':float(source_ms),'reference_ms':float(reference_ms),
+        'feature_ms':float(feature_ms),'model_ms':float(model_ms),
+        'source_rollout_calls':int(source_calls),
+        'reference_rollout_calls':int(reference_calls),
+        'candidate_count':len(actions),
+        'source_recompute_calls':len(actions),
+        'anchor_recompute_calls':1,
+        'callback_count':None,'reused':None,'fallback':None,
+    }
     return record
 
 def fit_cbc(records,output,epochs=75,seed=11,variant='full',device='auto',contrast_weight=0.):
