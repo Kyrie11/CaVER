@@ -54,7 +54,7 @@ class CascadeRiskHead(nn.Module):
     """Physics-anchored event/boundary correction; no raw risk-score only head."""
     def __init__(self,width=96,variant='full'):
         super().__init__()
-        if variant not in ('full','no_events','graph','anchor_full','anchor_graph','anchor_graph_event'):
+        if variant not in ('full','no_events','graph','anchor_full','anchor_graph','anchor_graph_event','anchor_graph_event_local','anchor_graph_delay_kernel'):
             raise ValueError('Unknown CBC model variant')
         self.variant=variant
         self.feature_norm=nn.LayerNorm(len(FEATURES))
@@ -86,28 +86,37 @@ class JointRiskHead(nn.Module):
     ego/union means are physics anchors; gradients learn reference reactor
     corrections from independently sampled *joint* rollouts.
     """
-    def __init__(self, width=64, suppress_events=False):
+    def __init__(self, width=64, suppress_events=False, graph_dim=0):
         super().__init__()
         self.suppress_events=bool(suppress_events)
+        self.graph_dim=max(0,int(graph_dim))
         self.encoder=nn.Sequential(nn.LayerNorm(len(FEATURES)),nn.Linear(len(FEATURES),width),
                                    nn.SiLU(),nn.Linear(width,width),nn.SiLU())
-        self.decoder=nn.Sequential(nn.Linear(width*2,width),nn.SiLU(),nn.Linear(width,2))
+        self.decoder=nn.Sequential(nn.Linear(width*2+self.graph_dim,width),nn.SiLU(),nn.Linear(width,2))
 
-    def forward(self, x):
+    def forward(self, x, graph_context=None):
         if x.ndim!=2 or x.shape[0]<1 or x.shape[-1]!=len(FEATURES):
             raise ValueError('Expected [downstream_pairs,features] for one candidate')
         encoded=x.clone()
         if self.suppress_events:
             encoded[...,list(map(FEATURES.index,EVENT_FEATURES))]=0.
         z=self.encoder(encoded)
-        correction=self.decoder(torch.cat((z.mean(0),z.max(0).values),dim=-1))
+        summary=torch.cat((z.mean(0),z.max(0).values),dim=-1)
+        if self.graph_dim:
+            if graph_context is None:
+                graph_context=torch.zeros(self.graph_dim,dtype=summary.dtype,device=summary.device)
+            graph_context=torch.as_tensor(graph_context,dtype=summary.dtype,device=summary.device).reshape(-1)
+            if graph_context.numel()!=self.graph_dim:
+                raise ValueError('Graph context dimension does not match joint head')
+            summary=torch.cat((summary,graph_context),dim=-1)
+        correction=self.decoder(summary)
         idx_ego=FEATURES.index('source_ego_contact')
         idx_down=FEATURES.index('source_downstream_union')
         anchor=torch.stack((x[:,idx_ego].mean(),x[:,idx_down].mean())).clamp(.005,.995)
         return torch.sigmoid(torch.logit(anchor)+correction)
 
 
-def predict_joint(model, scene_pair_features):
+def predict_joint(model, scene_pair_features, graph_context=None):
     """Output joint ego, union source risk, optionally corrected by CBC.
 
     Algebraic consistency projection is a conservatively declared model
@@ -118,7 +127,7 @@ def predict_joint(model, scene_pair_features):
         raise ValueError('Invalid full candidate pair feature matrix')
     if model is not None and hasattr(model,'joint'):
         with torch.no_grad():
-            result=model.joint(torch.tensor(a,dtype=torch.float32)).numpy()
+            result=model.joint(torch.tensor(a,dtype=torch.float32), graph_context).numpy()
         ego,down=map(float,result)
     else:
         ego=float(np.mean(a[:,FEATURES.index('source_ego_contact')]))
@@ -176,6 +185,7 @@ def load(path):
     except TypeError:record=torch.load(path,map_location='cpu')
     if tuple(record['features'])!=FEATURES:raise ValueError('CBC feature schema incompatible with checkpoint')
     variant=record.get('variant','full')
+    meta=record.get('meta',{})
     m=CascadeRiskHead(variant=variant)
     if record.get('has_graph'):
         from caver.models.temporal import GraphCascadeRiskHead
@@ -183,11 +193,19 @@ def load(path):
         graph_channels=int(graph_weight.shape[0]) if graph_weight is not None else 16
         m.graph_model=GraphCascadeRiskHead(
             len(FEATURES), channels=graph_channels,
-            event_pool=(variant=='anchor_graph_event'))
+            event_pool=(variant in ('anchor_graph_event','anchor_graph_event_local')),
+            event_local=(variant=='anchor_graph_event_local'),
+            delay_kernel=(variant=='anchor_graph_delay_kernel'))
         for module in (m.feature_norm,m.encoder,m.output):
             for parameter in module.parameters():
                 parameter.requires_grad_(False)
     if record.get('has_joint_head'):
-        m.joint=JointRiskHead(suppress_events=(variant=='no_events'))
-    m.load_state_dict(record['weights']);m.eval();m.meta=record.get('meta',{})
+        # Infer graph conditioning from the serialized decoder shape so old
+        # v5 checkpoints remain loadable. New graph variants store 32 extra
+        # context channels, while legacy checkpoints store none.
+        weight=record['weights'].get('joint.decoder.0.weight')
+        input_dim=int(weight.shape[1]) if weight is not None else 128
+        graph_dim=max(0,input_dim-128)
+        m.joint=JointRiskHead(suppress_events=(variant=='no_events'),graph_dim=graph_dim)
+    m.load_state_dict(record['weights']);m.eval();m.meta=meta
     return m

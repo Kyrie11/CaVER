@@ -162,6 +162,41 @@ def paired_boundary_diagnostics(source_by_action,ref_by_action,pairs,actions,dt=
              'event_sources':'PAIRED_STRUCTURAL_INTERVENTION_OUTCOME_LABELS_NOT_ONLINE_EVIDENCE'}
     return result
 
+
+def _event_timing_labels(source_by_action, ref_by_action, actions, scene):
+    """Export censor-aware onset labels for offline event diagnostics.
+
+    These labels are generated only after the held-out reference rollouts and
+    are never consumed by CBC features.  A missing onset is right-censored at
+    the horizon rather than encoded as a numeric sentinel.
+    """
+    labels=[]
+    non_ego=[a.agent_id for a in scene.agents if a.agent_id!=scene.ego_id]
+    for action in actions:
+        aid=action.action_id
+        src=source_by_action.get(aid,[]);ref=ref_by_action.get(aid,[])
+        for actor in non_ego:
+            src_on=[float(r['response_onset'][actor]) for r in src
+                    if r.get('response_onset',{}).get(actor) is not None]
+            ref_on=[float(r['response_onset'][actor]) for r in ref
+                    if r.get('response_onset',{}).get(actor) is not None]
+            labels.append({
+                'event_type':'brake_onset',
+                'action_id':aid,
+                'actor_id':actor,
+                'reference_present':bool(ref_on),
+                'predicted_present':bool(src_on),
+                'reference_onset_s':float(np.median(ref_on)) if ref_on else None,
+                'predicted_trigger_s':float(np.median(src_on)) if src_on else None,
+                'reference_onset_q10_s':float(np.quantile(ref_on,.1)) if ref_on else None,
+                'reference_onset_q90_s':float(np.quantile(ref_on,.9)) if ref_on else None,
+                'predicted_onset_q10_s':float(np.quantile(src_on,.1)) if src_on else None,
+                'predicted_onset_q90_s':float(np.quantile(src_on,.9)) if src_on else None,
+                'reference_censored':not bool(ref_on),
+                'predicted_censored':not bool(src_on),
+                'label_scope':'SIMULATOR_CONDITIONAL_OFFLINE_EVENT_DIAGNOSTIC'})
+    return labels
+
 def paired_scene(scene,actions=None,source_family='delayed_idm',audit_families=('late_brake','conservative'),
                  source_worlds=4,audit_worlds=16,seed=0,model=None,source_policy=None):
     """Produces ex ante features and HELD OUT simulated reference targets.
@@ -212,6 +247,7 @@ def paired_scene(scene,actions=None,source_family='delayed_idm',audit_families=(
             'actions':[asdict(a) for a in actions],'pairs':pairs,'predicted':prediction,'audited':reference,
             'diagnostics':diagnostics,'temporal':temporal,'candidate_matching':matching,
             'boundary_diagnostics':boundary,
+            'event_timing_labels':_event_timing_labels(source_by_action,ref_by_action,actions,scene),
             'reference_label':'SIMULATOR_CONDITIONAL_ONLY'}
     if 'early' in record['temporal']:
         from caver.models.anchor import build_anchor_view
@@ -304,7 +340,7 @@ def fit_cbc(records,output,epochs=75,seed=11,variant='full',device='auto',contra
         raise ValueError('CBC train data must not contain calibration/test rollouts')
 
     uses_anchor=variant.startswith('anchor_')
-    uses_graph=variant in ('graph','anchor_graph','anchor_graph_event')
+    uses_graph=variant in ('graph','anchor_graph','anchor_graph_event','anchor_graph_event_local','anchor_graph_delay_kernel')
     training_groups=[]
     contrastive_data={}
     example_count=0
@@ -358,11 +394,14 @@ def fit_cbc(records,output,epochs=75,seed=11,variant='full',device='auto',contra
         raise ValueError('Need >=6 pairs and >=2 joint candidate labels')
 
     m=CascadeRiskHead(variant=variant)
-    m.joint=JointRiskHead(suppress_events=(variant=='no_events'))
+    m.joint=JointRiskHead(suppress_events=(variant=='no_events'), graph_dim=(32 if uses_graph else 0))
     if uses_graph:
         from caver.models.temporal import GraphCascadeRiskHead
         m.graph_model=GraphCascadeRiskHead(
-            len(FEATURES),channels=16,event_pool=(variant=='anchor_graph_event'))
+            len(FEATURES),channels=16,
+            event_pool=(variant in ('anchor_graph_event','anchor_graph_event_local')),
+            event_local=(variant=='anchor_graph_event_local'),
+            delay_kernel=(variant=='anchor_graph_delay_kernel'))
         # Graph variants use graph_model for pair prediction; freeze the
         # unused dense pair head so it is neither trained nor counted as
         # active capacity. It remains in the state dict for old API shape.
@@ -383,11 +422,12 @@ def fit_cbc(records,output,epochs=75,seed=11,variant='full',device='auto',contra
         for idx in order:
             row_index,action,features,targets,joint,trace,pairs=training_groups[idx]
             features=features.to(dev);targets=targets.to(dev);joint=joint.to(dev)
+            graph_context=None
             if uses_graph:
-                pair_prediction=m.graph_model(features,trace,pairs)
+                pair_prediction,graph_context=m.graph_model(features,trace,pairs,return_summary=True)
             else:
                 pair_prediction=m(features)
-            joint_prediction=m.joint(features)
+            joint_prediction=m.joint(features,graph_context)
             loss=training_loss(pair_prediction,targets)+torch.nn.functional.binary_cross_entropy(
                 joint_prediction.clamp(1e-6,1-1e-6),joint)
 
@@ -435,6 +475,7 @@ def fit_cbc(records,output,epochs=75,seed=11,variant='full',device='auto',contra
                    'active_parameter_count':active_parameter_count,
                    'total_parameter_count':total_parameter_count,
                    'graph_channels':16 if uses_graph else None,
+                   'graph_conditioned_joint':bool(uses_graph),
                    'train_source':'simulator_reference','variant':variant,'seed':seed,
                    'epochs':epochs,'slack_masked':True,'training_device':str(dev),
                    'contrast_weight':contrast_weight,
@@ -470,12 +511,15 @@ def record_with_new_predictions(row,model):
         feat=[(row['anchor_view']['candidate_features'][f'{a}/{pair}'] if uses_anchor
                else row['diagnostics'][f'{a}/{pair}']['features']) for pair in row['pairs']]
         graph=(row['anchor_view']['candidate_temporal'] if uses_anchor else row.get('temporal',{}))
-        if getattr(model,'variant',None) in ('graph','anchor_graph','anchor_graph_event'):
+        graph_context=None
+        if getattr(model,'variant',None) in ('graph','anchor_graph','anchor_graph_event','anchor_graph_event_local','anchor_graph_delay_kernel'):
             if a not in graph:
                 raise ValueError('Graph predictor has no source temporal evidence')
             with torch.no_grad():
-                outs=model.graph_model(torch.tensor(np.asarray(feat),dtype=torch.float32),
-                                       graph[a],row['pairs']).cpu().numpy()
+                outs,graph_context=model.graph_model(
+                    torch.tensor(np.asarray(feat),dtype=torch.float32),
+                    graph[a],row['pairs'],return_summary=True)
+                outs=outs.cpu().numpy()
             estimates=[{'p':float(o[0]),'margin':float(o[1]),'slack':float(o[2])} for o in outs]
         else:
             estimates=[predict(model,v) for v in feat]
@@ -484,7 +528,7 @@ def record_with_new_predictions(row,model):
             diagnostics[f'{a}/{pair}']['cbc_margin_prediction_m']=estimate['margin']
             diagnostics[f'{a}/{pair}']['cbc_event_slack_prediction_m']=estimate['slack']
         if feat:
-            j=predict_joint(model,feat)
+            j=predict_joint(model,feat,graph_context)
             pred[f'{a}/ego']=j['ego']
             pred[f'{a}/down']=j['down']
     pred=coherent_project(pred,names,row['pairs'])

@@ -1,0 +1,740 @@
+\documentclass[10pt]{article}
+\usepackage[margin=0.95in]{geometry}
+\usepackage{amsmath,amssymb,amsfonts,amsthm,mathtools,bm}
+\usepackage{booktabs,multirow,graphicx,array,enumitem,xcolor,microtype}
+\usepackage{algorithm,algpseudocode,mathrsfs}
+\usepackage{hyperref}
+\usepackage[backend=biber,style=authoryear,maxcitenames=2,maxbibnames=99,natbib=true]{biblatex}
+\addbibresource{interactive_planning.bib}
+\hypersetup{colorlinks=true,linkcolor=blue!55!black,citecolor=blue!55!black,urlcolor=blue!55!black}
+\newcommand{\method}{\textsc{CaVER}}
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\Prob}{\mathbb{P}}
+\newcommand{\ind}{\mathbf{1}}
+\newcommand{\cA}{\mathcal{A}}
+\newcommand{\cB}{\mathcal{B}}
+\newcommand{\cC}{\mathcal{C}}
+\newcommand{\cG}{\mathcal{G}}\newcommand{\cK}{\mathcal{K}}
+\newcommand{\cH}{\mathcal{H}}
+\newcommand{\cL}{\mathcal{L}}
+\newcommand{\cM}{\mathcal{M}}
+
+\newcommand{\cN}{\mathcal{N}}
+\newcommand{\cD}{\mathcal{D}}
+\newcommand{\cE}{\mathcal{E}}
+\newcommand{\cP}{\mathcal{P}}
+\newcommand{\cQ}{\mathcal{Q}}
+\newcommand{\cS}{\mathcal{S}}
+\newcommand{\cU}{\mathcal{U}}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\relu}[1]{\left[#1\right]_+}
+\DeclareMathOperator*{\argmin}{arg\,min}
+\DeclareMathOperator*{\argmax}{arg\,max}
+\DeclareMathOperator{\clip}{clip}
+\newtheorem{proposition}{Proposition}\newtheorem{assumption}{Assumption}\newtheorem{remark}{Remark}
+\newtheorem{definition}{Definition}
+\setlength{\emergencystretch}{3em}
+\title{\textbf{CaVER: Decision-Reliable Planning\\under Cascading Traffic Responses}}
+\author{Anonymous Authors}
+\date{}
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Near-neighbor ego trajectories can elicit different downstream responses even when they share a maneuver intent and remain collision-free for the ego vehicle. A small shift in an intermediate vehicle's braking onset may cross a follower's stopping or contact boundary, whereas conventional prediction fidelity does not establish whether the resulting action ranking is sufficiently supported for execution. We formulate cascade-sensitive planning as a problem of response-boundary discrimination and decision-evidence certification. CaVER comprises Cascade Boundary Contrast (CBC), which propagates delayed, mode-dependent action perturbations and localizes cases in which an anchor prediction cannot be safely reused; Decision-Sufficient Evidence (DSE), which separates reference-law risk admissibility from near-optimal action choice under a coherent uncertainty set; and Targeted Independent Verification (TIV), which routes failed decision constraints to specific mediator events and source-aware verification queries under an execution deadline. A hybrid-response boundary result bounds the change in third-party contact probability within a declared structural policy family, while a finite-program characterization of plausible-safe regret identifies unresolved choice ambiguity. Under explicitly stated reference-law and whole-episode exchangeability assumptions, we derive a marginal released-action risk bound without claiming scene-conditional or real-world zero-collision safety. The formulation distinguishes simulator-dependent counterfactual attribution, policy-conditioned recovery margins, physically bounded reachability and statistical risk evidence.
+\end{abstract}
+
+\section{Introduction}
+\label{sec:introduction}
+The driving decisions of an autonomous vehicle (ego) may change not only whether ego collides with another road user but also how surrounding vehicles interact with \emph{one another}. During a lane change, for example, a vehicle $B$ may brake to accommodate ego, altering the available stopping margin of a following vehicle $C$. The resulting $B$--$C$ collision may occur without any ego--agent contact. Such cascading responses are not a newly discovered traffic mechanism: connected-vehicle hyperedge games already model and mitigate multi-vehicle disturbances during lane changes \parencite{li2025mitigating}, while heterogeneous-traffic conflict analysis identifies and studies the propagation of secondary conflicts \parencite{luo2025analysis}. The open planning question is therefore not whether cascades exist, but \emph{how reliably an ego planner can discriminate the consequences of its own alternatives from limited, imperfect response predictions}.
+
+Contemporary interactive planners go beyond static-obstacle checks. Joint interaction models generate mutually consistent multi-agent trajectories \parencite{luo2023jfp,huang2023gameformer}; Bayesian and multimodal contingency planners reason about uncertain reactions \parencite{mustafa2024racp}; and proposal-conditioned planners explicitly model feedback from ego's candidate action \parencite{yu2025hype}. Most directly, INTERACT conditions a prediction model once on each intent anchor, then refines the ego trajectory within a geometric trust region while reusing that forecast \parencite{distelzweig2026interact}. These approaches establish that interactive prediction and efficient planning are already well studied. Nevertheless, two questions remain logically distinct: \emph{does the response forecast support a correct safety ordering of near-neighbor candidates}, and \emph{is the evidence behind that ordering sufficiently reliable to authorize a decision}? Strong overall planning scores or low average displacement error do not answer either question by themselves.
+
+\paragraph{A decision-critical cascade.}
+Consider a lane change with ego in one lane and $B,C$ in the destination lane. Let $a^-$ and $a^+$ denote two legal, same-intent ego candidates sharing nearly identical paths, completion times, and progress. A slight difference in acceleration timing can change $B$'s braking onset. Since $C$ acts independently and may have a finite response delay and a limited deceleration envelope, one candidate can move the $B$--$C$ pair across its recoverability boundary while the other does not. Both candidates may remain collision-free for ego. A predictor that produces essentially the same $B,C$ forecast for both may be accurate in typical scenes yet wrong \emph{where the sign of the safety difference matters}. The distinction motivates controlled mediation tests and evaluation with independently reacting traffic policies, rather than inference from geometric candidate similarity alone.
+
+A crucial confound is that $B$--$C$ may already be unsafe in the original scene. Merely detecting a later third-party collision does not establish that ego induced it. We require comparisons under the same initial conditions and matched latent driver variables, with a feasible reference intervention and candidate-specific response models. We distinguish (1) \emph{absolute downstream risk}, (2) \emph{ego-induced risk increment relative to a reference action}, and (3) \emph{pairwise downstream risk difference between task-matched ego actions}. Controlled mediation interventions provide additional evidence for an ego$\rightarrow B\rightarrow C$ pathway; correlation, graph attention, and source-model predictions alone do not establish causal responsibility.
+
+\paragraph{Scientific research questions.}
+\begin{description}[style=nextline,itemsep=3pt]
+ \item[\textbf{RQ1 --- Action-Dependent Cascading Safety.}]
+ Can locally similar, intent-matched ego candidates induce materially different third-party collision and conditional recoverability outcomes through independently reacting traffic agents, despite remaining individually ego-safe? Are such differences attributable to a controlled ego intervention and avoidable by a task-comparable alternative?
+ \item[\textbf{RQ2 --- Decision-Critical Response Discriminability.}]
+ When do finite or misspecified ego-conditioned response predictions underestimate, obscure, or reverse these candidate-pair safety differences? Which response chains and uncertainty sources make the ranking error consequential for a planner's final choice?
+ \item[\textbf{RQ3 --- Decision Reliability under Limited Evidence.}]
+ How can a planner determine whether its response evidence suffices for a safety-relevant ranking, allocate extra verification to the most consequential agent chains, and act safely and efficiently when the ranking remains unresolved at the decision deadline?
+\end{description}
+
+\paragraph{Proposed approach.}
+CaVER treats the sufficiency of planning evidence as a decision problem rather than using predictive uncertainty as a direct surrogate for safety. Cascade Boundary Contrast (CBC) traces delayed action-dependent mode switches and their effects on screened third-party contact and stopping margins, introducing a guard-aware alternative to purely geometric anchor trust regions. Decision-Sufficient Evidence (DSE) separates a reference-law risk-admission certificate from a stronger comparison with alternatives that could be safe under the remaining plausible risk worlds. Targeted Independent Verification (TIV) uses failures of these decision tests to localize a response-chain event and select a credible information source before an execution deadline. Risk evidence from physical envelopes, reactive simulators and statistical calibration is kept explicit and non-interchangeable.
+
+\paragraph{Contributions.}
+\textbf{(1) Cascade-boundary evidence:} a hybrid, time-causal response representation and a source-conditional bound linking possible mode/contact-boundary crossings to the risk difference of intent-matched actions. \textbf{(2) Two-level decision certification:} coherent simultaneous risk intervals and distinct risk-admissibility and plausible-safe choice certificates, with finite linear-program witnesses for unresolved alternatives. \textbf{(3) Source-aware verification:} a decision-witness-guided query policy that links ambiguous response events to independent verification sources, deadline-aware prefixes and terminal certification. We provide explicit counterfactual-identification limits and a falsifiable evaluation protocol rather than treating simulator outcomes as observed human intervention effects.
+
+\section{Related Work and Research Boundary}
+\label{sec:related}
+\paragraph{Cascading traffic and multi-agent interaction.}
+The intentional hyperedge game of \textcite{li2025mitigating} directly models and mitigates lane-change cascades among connected vehicles. \textcite{luo2025analysis} studies secondary-conflict identification and heterogeneous risk propagation using a risk field, chain extraction, and interpretable classification. Their findings motivate cascades, but neither finding establishes the reliability of an \emph{ego-candidate pair's predicted safety ordering} under limited response evidence. That distinction, rather than ownership of cascade modeling itself, defines our scope. Courtesy costs and responsibility-aware safety are also substantive precedents: the presence of imposed third-party cost is not new \parencite{sun2018courteous,cosner2023learning}.
+
+\paragraph{Joint and ego-conditioned reactive planning.}
+JFP models joint future consistency \parencite{luo2023jfp}; GameFormer iteratively refines interactive futures \parencite{huang2023gameformer}; RACP plans under Bayesian multimodal intentions \parencite{mustafa2024racp}; conditional multimodal prediction with tree policies addresses reaction uncertainty \parencite{jang2026reaction}; and HYPE conditions occupancy forecasts on candidate proposals \parencite{yu2025hype}. INTERACT efficiently reuses anchor-conditioned predictions under a geometric trust-region penalty \parencite{distelzweig2026interact}. Its demonstrated planning quality is important, not a strawman. Our proposed diagnostic is narrower: can the trust region be large \emph{in trajectory space} yet unsafe \emph{in the pairwise downstream risk order}? The distinction must be tested on actual refined candidates, under the baseline's own forecast and optimization budget. No conclusion of INTERACT failure follows merely from an external four-car toy example. Recent trajectory-conditioned safety reasoning in SafeDrive also predicts critical-agent risk; our distinct target is the \emph{cross-action order and insufficiency of its evidence}, including non-ego pair margins and a targeted verification policy \parencite{kim2026safedrive}.
+
+\paragraph{Counterfactual responsibility and structured attribution.}
+Counterfactual effect decomposition in multi-agent sequential decisions separates effects mediated by subsequent agents' actions from effects mediated by state transitions \parencite{triantafyllou2024counterfactual}. Causal planning also uses counterfactual reasoning to improve generalization \parencite{xie2026causalplanner}. We draw on structural interventions but do not claim attention weights or latent-agent differences identify physical cause. Controlled simulator actions can support \emph{model-relative} causal attribution; observational WOMD trajectories alone cannot identify unexecuted counterfactual responses. Our output is a candidate-specific third-party safety consequence with a traceable mediator and evaluation assumptions, not an unrestricted assignment of legal blame.
+
+\paragraph{Decision-focused uncertainty, calibration, and selective reasoning.}
+SIGMA's expected planning gain (EPG) values additional perception/semantic reasoning according to its downstream MPC impact \parencite{chen2026not}. Decision-focused learning has been formulated as ranking rather than minimizing prediction error \parencite{mandi2022decision}; system-level trajectory-prediction failures have also been characterized by planning regret \parencite{nakamura2025not}. We do not treat regret itself as a novel planning measure. Conformal risk control provides expected-loss control under stated calibration assumptions \parencite{angelopoulos2024conformal}; trajectory-prediction uncertainty under shift is treated in CUQDS \parencite{huang2025cuqds}; post-selection conformal safety-clearance margins have also been studied for driving trajectory choice \parencite{chang2026barrier}; and adversarially robust conformal planning explicitly addresses distribution shifts induced by interactive policy updates \parencite{mirzaeedodangeh2025safe}. Our target is a cascade-event-conditioned action certificate that distinguishes risk admissibility from plausible-safe selection, together with source-aware verification of the particular third-party response events that can invalidate either decision. Action-conditional conformal decisions and calibrated runtime safety policies are also close prior art \parencite{zhu2026conformal,pek2020using}. Distribution-free claims cannot be transferred to off-policy ego interventions without additional assumptions.
+
+
+\section{Problem Formulation}
+\label{sec:problem}
+\paragraph{Matched ego interventions and response laws.}
+Given histories and map $s$, let $\cA(s)$ be a finite set of lawful, dynamically feasible ego trajectories $a=(\iota_a,\xi_a)$ over horizon $H$, and let $a^0$ be an independently specified feasible reference for attribution (not necessarily safe). A pair $a,b$ is task-matched when maneuver intent, normalized ego-trajectory distance and task progress/comfort difference meet predeclared thresholds. Let $P^{\rm real}$ denote the unknown real conditional response law and $P^{\rm ref}$ a separately audited reactive-model law. Under either declared law $P$, the intervention $\operatorname{do}(X_e=X_e^a)$ generates a joint response $Y^a$. Observational logs identify only the executed action's response, not the counterfactual response to unexecuted $a$; quantities indexed by $P^{\rm ref}$ are simulation-conditional. Appendix~\ref{app:actions} and \ref{app:world} specify these distinctions.
+
+\paragraph{Two safety relations and three notions of recoverability.}
+Let $\cG_I$ denote a time-directed response-influence graph whose edges are screened by physically reachable interaction, and let $\cG_S$ be a conservative set of unordered \emph{non-ego} vehicle pairs $p=\{i,j\}$ whose swept footprints can conflict. Neither graph attention nor a predicted collision establishes an ego-induced event. For each action/world, let $d_p^a(t)$ be signed swept-footprint clearance and
+\begin{equation}
+ m_p^{\rm col}(a,\omega)=\min_{t\in[0,H]}d_p^a(t),\qquad
+ c_p^a(\omega)=\ind\{m_p^{\rm col}(a,\omega)\leq0\}.
+ \label{eq:col}
+\end{equation}
+We distinguish $m_p^{\rm col}$ from a \emph{policy-conditioned stopping slack} $m_p^{\pi}$ (available for a validated encounter geometry and delayed response-policy class), an \emph{existential} recovery $m_p^{\rm ex}$ for a given continuation, and a \emph{robust} recovery $m_p^{\rm rob}$ against a specified set of admissible continuations. A positive $m_p^{\rm ex}$ says some maneuver can succeed after seeing a particular continuation; it does not claim that the driver will choose it or that it works against unknown futures. Policy-conditioned failure probability and physical viability are thus separate. See Appendix~\ref{app:recovery}.
+
+For longitudinal following, at the instant $t_d$ at which a follower $j$ can detect a braking conflict with leader $i$, define the \emph{RSS-inspired} delayed-stopping distance (with a separately swept-path check):
+\begin{equation}
+ d_{\rm stop}=\relu{
+  v_j\tau_j+\tfrac12a_j^+\tau_j^2+
+  \frac{(v_j+a_j^+\tau_j)^2}{2b_j^{\rm eff}}-
+  \frac{v_i^2}{2b_i^{\rm lead}}},\quad
+ m_p^{\pi}=g_p(t_d)-d_{\rm stop}.
+ \label{eq:stop}
+\end{equation}
+Here $\tau_j$ is policy-dependent detection-to-effective-braking delay, $a_j^+$ bounds acceleration before braking, $b_j^{\rm eff}>0$ is attainable braking deceleration \emph{under the considered response policy}, $b_i^{\rm lead}$ is the declared leader braking envelope and $g_p$ is bumper gap. A negative $m_p^\pi$ flags a deficit relative to this specific longitudinal stopping response, \emph{not} inevitable contact: lateral escape or a different feedback policy may remain available. The closed-form proxy is neither evaluated outside its model scope nor substituted for a continuous 2D contact check. \parencite{shalev2017rss,durrani2024new}
+
+\paragraph{Absolute, excess and contrast risk.}
+For pair $p$, define collision probability $C_p^P(a)=\E_P[c_p^a]$ and a bounded risk $R_p^P(a)=\E_P[\ell_p^a]$, where $\ell_p^a=c_p^a+(1-c_p^a)\lambda_s\phi(m_p^\pi)$ when a valid policy-slack label exists and $\ell_p^a=c_p^a$ otherwise; $0\leq\lambda_s<1$ and $0\leq\phi\leq1$. Missing slack labels have an explicit validity mask rather than being renamed ``recoverability.'' Define
+\begin{equation}
+ I_p^P(a;a^0)=C_p^P(a)-C_p^P(a^0),\qquad
+ \Delta_p^P(a,b)=R_p^P(a)-R_p^P(b).
+ \label{eq:risk}
+\end{equation}
+A positive $I_p$ is an \emph{excess marginal pair-contact probability relative to the declared reference}, not an identified accident-responsibility fraction. In particular, a background $B$--$C$ conflict can remain risky while $I_{BC}\approx0$. The downstream union event $c_{\rm down}^a=\ind\{\exists p\in\cG_S:c_p^a=1\}$ is evaluated on the \emph{joint} rollout and $C_{\rm down}^P(a)=\E_P[c_{\rm down}^a]$; it counts any non-ego collision once rather than summing dependent pair probabilities.
+
+\paragraph{Coupling-free boundary-transition bounds.}
+For a predeclared pair failure event $F_p^a\in\{0,1\}$ (contact, or $m_p^\pi\leq b$ in a validated encounter class), denote $p_a=\Prob_P(F_p^a=1\mid s)$ and $p_b=\Prob_P(F_p^b=1\mid s)$. The \emph{individual-world flip} $B_p(a,b)=\Prob(F_p^a\ne F_p^b\mid s)$ is not point-identified by these marginals. Nevertheless all compatible cross-world couplings obey the sharp Fr\'echet bounds
+\begin{align}
+ |p_a-p_b|&\leq B_p(a,b)\leq\min\{p_a+p_b,2-p_a-p_b\}, \label{eq:frechet}\\
+ \relu{p_a-p_b}&\leq H_p(a\!\to\! b):=\Prob(F_p^a=1,F_p^b=0\mid s)
+ \leq\min\{p_a,1-p_b\}.\label{eq:harm}
+\end{align}
+The lower bound in Eq.~\eqref{eq:harm} can establish a \emph{minimum harmful-change mass over all couplings} when $p_a>p_b$; it does not identify which real driver would switch. Fixed-latent paired simulations yield a separate, explicitly $P$-and-coupling-dependent diagnostic $B_p^{P,\gamma}$, never an observed individual causal frequency. A proof and uncertain-marginal extensions are in Appendix~\ref{app:identification} \parencite{zhang2025individual}.
+
+\section{Method}
+\label{sec:method}
+\paragraph{Overview.}
+\method{} couples three operations that have distinct evidential roles. \emph{Cascade Boundary Contrast} (CBC) constructs action-conditioned multi-agent responses and identifies where small ego perturbations may change downstream response modes or contact events. \emph{Decision-Sufficient Evidence} (DSE) asks first whether an action meets explicit risk constraints, and separately whether the remaining uncertainty can change the preferred admissible action. \emph{Targeted Independent Verification} (TIV) traces failed decision tests to specific response events and selects a timely, source-aware query. The planner distinguishes reference-law risk admissibility, stronger choice certification, and an uncertified outcome; neither a low prediction error nor an uneventful ego trajectory is itself a safety certificate.
+
+\subsection{CBC: Cascade Boundary Contrast}
+\label{sec:cbc}
+\paragraph{Action-conditioned response and event structure.}
+For a candidate $a$, a nonanticipative joint response model generates $Y^{a,m,k}$ under an audited traffic-policy family $m$ and driver latent sample $z^k$. The latent state includes response mode, detected conflict onset, observation/actuation delay, comfortable and available braking, and shared traffic factors. Each agent reacts to its own observation history; it does not observe unexecuted ego controls. We cache full rollouts for an intent anchor $\bar a$ and estimate the within-mode response difference of a matched action $a$ by a time-causal residual head:
+\begin{equation}
+ r_{i,t+1}^{a,k}=F_\theta\!\left(r_{i,t}^{a,k},h_{i,t}^{\bar a,k},
+ \sum_{j\in\operatorname{Pred}(i,t)} w_{ji,t}
+ M_\theta(r_{j,t-d_{ji}}^{a,k},h_{j,t-d_{ji}}^{\bar a,k})\right).
+ \label{eq:transport}
+\end{equation}
+Here $d_{ji}\ge0$ is an observation-to-action delay; directed edges are screened by physically possible encounters, and an uncertain learned edge weight does not remove an otherwise reachable interaction. A fine integration grid resolves braking onset separately from the motion backbone's token interval. Candidate-conditioned rollouts yield a swept-footprint contact margin $m_p^{\rm col}$ and, only in valid longitudinal encounters, a policy-conditioned stopping margin $m_p^\pi$. The central question is whether the residual can be used \emph{without crossing a discrete response boundary}.
+
+\paragraph{Cascade-boundary localization.}
+An event guard $g_\gamma^{a}(z)$ is a signed quantity whose crossing changes the response mode or the timing branch of a reachable agent, such as the onset of hard braking. Let $\Gamma_{e\leadsto\mathcal G_S}$ contain the time-indexed guards on any screened ego-to-third-party response path. Conditional on all preceding mode decisions agreeing for $a$ and $\bar a$, a validated incremental propagation model supplies guard and clearance bounds
+\begin{equation}
+ |g_\gamma^{a}(z)-g_\gamma^{\bar a}(z)|\le e_\gamma(a,\bar a,z),\qquad
+ |m_p^{\rm col}(a,z)-m_p^{\rm col}(\bar a,z)|\le e_p(a,\bar a,z).
+ \label{eq:guardbounds}
+\end{equation}
+The second inequality is applied after all relevant guards have remained unchanged. These are genuine bounds only for a declared hybrid policy, dynamics and disturbance envelope; a learned derivative or ensemble variance is not substituted for them. Define the exceptional boundary set
+\begin{align}
+ \mathfrak B(a\mid\bar a)=&\bigcup_{\gamma\in\Gamma_{e\leadsto\mathcal G_S}}
+ \{z:|g_\gamma^{\bar a}(z)|\le e_\gamma(a,\bar a,z)\}\nonumber\\
+ &\cup\bigcup_{p\in\mathcal G_S}
+ \{z:|m_p^{\rm col}(\bar a,z)|\le e_p(a,\bar a,z)\}.
+ \label{eq:boundaryevent}
+\end{align}
+Under guard completeness and valid within-mode bounds, every structural world outside $\mathfrak B$ preserves both the mode sequence and all screened third-party contact indicators. Consequently, for any specified policy-family law $P_m$,
+\begin{equation}
+ |C_{\rm down}^{P_m}(a)-C_{\rm down}^{P_m}(\bar a)|
+ \le P_m\bigl(\mathfrak B(a\mid\bar a)\bigr).
+ \label{eq:boundarymass}
+\end{equation}
+Appendix~\ref{app:hybridlemma} proves this \emph{within-model} result. In computation, a guard whose interval excludes zero permits within-mode response reuse; a guard whose interval straddles zero triggers a split across plausible modes or a full candidate-conditioned rollout. This produces a \emph{cascade-boundary trust region} defined by downstream consequences rather than ego trajectory distance alone. For a source-law upper confidence bound $\overline\beta_m(a\mid\bar a)$ on the event mass, the reuse region is
+\begin{equation}
+ \mathcal T_{\eta}^{m}(\bar a)=\{a:\operatorname{Valid}_m(a,\bar a)=1,
+ \ \overline\beta_m(a\mid\bar a)\le\eta\},\qquad
+ C_{\rm down}^{P_m}(a)\le\min\{1,C_{\rm down}^{P_m}(\bar a)+\overline\beta_m\}.
+ \label{eq:trustregion}
+\end{equation}
+The displayed risk-transfer inequality holds on the event that $\overline\beta_m$ actually upper-bounds the source-law exceptional mass, with its stated mass-estimation confidence. It supports bounded fast-response reuse, not unqualified equality of the candidate and anchor risks. The tolerance $\eta$ controls which responses require expensive recomputation, and may be tightened near DSE's risk/choice boundary; neither the source law nor the confidence event automatically transfers to an unseen real-world driver population. When a guard is missing, its perturbation bound is unavailable, or the policy family is unsupported, the physical exception bound defaults to one rather than providing false reassurance.
+
+\paragraph{Delay as a validity condition.}
+A response delay is not treated as an unconstrained scalar penalty.  We
+separate behavior delay inside the reactive source from evidence age at the
+planner.  Let $T_{\rm cb},T_{\rm feat},T_{\rm anc},T_{\rm graph},T_{\rm cal},
+T_{\rm fb}$ and $T_{\rm rel}$ denote callback, feature, anchor, graph,
+calibration, fallback and release components.  The measured evidence age is
+\begin{equation}
+ T_{\rm ev}=T_{\rm cb}+T_{\rm feat}+T_{\rm anc}+T_{\rm graph}+T_{\rm cal}
+ +T_{\rm fb}+T_{\rm rel},\qquad
+ T_{\rm res}=\left[T_{\rm ev}-T_{\rm beh}\right]_+,
+ \label{eq:latencydecomp}
+\end{equation}
+where $T_{\rm beh}$ is the detection-to-response delay already accounted for
+by the source reactor.  For an ordered interaction edge $i\to j$, we define
+an occupancy margin
+\[
+ m_{ij}^{\rm occ}(t)=d_{ij}(t)-q_{1-\alpha}(v_{ij}^{+})T_{\rm res}
+ -\tfrac12 q_{1-\alpha}(a_{ij}^{+})T_{\rm res}^{2}
+ -\epsilon_{ij}^{\rm geom}-\epsilon_{ij}^{\rm model},
+\]
+where $d_{ij}$ is the signed longitudinal clearance and the quantiles are
+computed on the frozen development response family.  The delay-aware graph
+uses a response-arrival kernel rather than a single mean.  For sample interval
+$\Delta t$, let
+\begin{equation}
+ K_{ij}(\ell)=\Pr\!\left(\ell\Delta t\le
+ T_{j}^{\rm response}-T_{i}^{\rm observation}< (\ell+1)\Delta t\right),
+ \qquad \sum_{\ell\ge1}K_{ij}(\ell)=1.
+ \label{eq:delaykernel}
+\end{equation}
+The message update is
+\begin{equation}
+ h_{j,t}^{\rm msg}=\sum_{i\in\operatorname{Pred}(j)}\sum_{\ell\ge1}
+ K_{ij}(\ell)W_{ij}h_{i,t-\ell}.
+ \label{eq:kerneltransport}
+\end{equation}
+The implementation stores arrival quantiles and a discretized kernel derived
+from the source policy family.  These quantities describe response evidence,
+not callback latency.
+A residual transport update is permitted only when the complete guard interval
+stays outside zero after this occupancy correction.  If an interval crosses
+zero, a candidate-conditioned branch is evaluated; if a required guard or
+latency measurement is missing, the method abstains and requests a full
+recomputation.  This makes latency alter the reuse decision itself and avoids
+double-counting the detection-to-braking delay already present in the reactive
+source rollout.
+
+\paragraph{Boundary-oriented risk contrasts.}
+CBC stores a joint outcome vector for each rollout: ego contact, the union of third-party contacts, individual non-ego contacts, response-onset times, and valid stopping deficits. A physics-anchored risk potential corrects the finite-rollout estimate using an independently audited residual,
+\begin{equation}
+ v_\psi(s,a,p)=\clip_{[0,1]}\!\left(
+ \frac1K\sum_{k=1}^{K}\ell_p(Y^{a,k})+b_\psi(s,a,p,\mathcal E_{ap})\right),
+ \quad\widehat\Delta_p(a,b)=v_\psi(s,a,p)-v_\psi(s,b,p).
+ \label{eq:contrast}
+\end{equation}
+Here $\mathcal E_{ap}$ records the guard sequence, response delays, policy support and risk provenance. Separate heads estimate $C_p$, $C_{\rm down}$ and $C_e$ directly from contact events; the near-miss-weighted $v_\psi$ is \emph{not} silently treated as a collision probability. The graph representation is also passed to the joint ego and downstream-union head so that both pair and union estimates consume the same delayed evidence. The shared potential makes pair contrasts antisymmetric and cycle-consistent. Training couples event-onset, swept-contact, stopping-slack, risk-contrast and downstream decision losses using independent structural-reactor labels (Appendix~\ref{app:cbctrain}). Observational logs train plausible policy behavior but never supply the unseen counterfactual outcome of an alternative ego action. The learned outputs are estimates; decision authorization is delegated to DSE.
+
+\paragraph{Isolating the incremental CBC mechanisms (proposed and testable).}
+The hypothesis that a response cascade can flip a third-party outcome is
+\emph{distinct} from the hypotheses that an event representation or a delayed
+graph improves the decision. The critical graph comparison holds the number of
+source-reactor invocations fixed and compares an anchor-conditioned graph
+against an equally expressive anchor-conditioned \emph{non-graph} residual
+model. Likewise, the event-feature comparison holds the complete
+candidate-conditioned source predictions fixed and masks explicit onset,
+stop-slack and path-hop features. Importantly, the latter ablation still
+contains source contact and swept-clearance predictions from a reactor that
+may itself model braking; it does not ablate all causal event dynamics.
+
+For each task-matched action pair $(a,b)$ and screened third-party pair $p$,
+let $\Delta_{abp}^{\rm ref}=C_p^{\rm ref}(a)-C_p^{\rm ref}(b)$ be a
+\emph{simulator-conditional} risk difference estimated from held-out
+reactive episodes. An optional \emph{training-only} objective fits this
+contrast and penalizes missed large-margin ordering:
+\begin{align}
+ \mathcal L_{\rm pair}^{\rm pilot}={}&
+ \frac1{|\mathcal Q_{\rm tr}|}\sum_{(a,b,p)\in\mathcal Q_{\rm tr}}
+ \operatorname{Huber}_{0.15}(\widehat\Delta_{abp}-\Delta_{abp}^{\rm ref})
+ \nonumber\\[-1mm]
+ &+\frac{0.1}{|\mathcal Q_{\rm tr}^{\rm crit}|\vee 1}
+ \sum_{(a,b,p)\in\mathcal Q_{\rm tr}^{\rm crit}}
+ \operatorname{softplus}\!\left(0.04-\operatorname{sgn}(\Delta_{abp}^{\rm ref})
+ \widehat\Delta_{abp}\right),
+ \label{eq:pairpilot}
+\end{align}
+where $\mathcal Q_{\rm tr}^{\rm crit}=\{(a,b,p)\in\mathcal Q_{\rm tr}:\
+|\Delta_{abp}^{\rm ref}|\ge0.1\}$. This is a preliminary discrimination
+loss rather than a certified boundary estimator. A stronger future variant
+would mask examples whose reference Monte Carlo confidence intervals include
+zero and weight boundary proximity only from \emph{pre-intervention}
+observations. Neither version is evaluated as an improvement merely because
+it is more complex; both require frozen held-out comparison.
+
+\subsection{DSE: Decision-Sufficient Evidence}
+\label{sec:dse}
+\paragraph{A joint, calibrated evidence set.}
+Let $\mathscr I$ be the final pre-certification information after any permitted query and holding prefix. It includes the current observed scene, remaining-horizon candidate set, model-source metadata and query outcomes; a terminal certification threshold is not allowed to change this information or initiate further queries. Write $r^{\rm ref}(\mathscr I)$ for the vector of reference-law \emph{conditional risk means} of all candidates and screened pairs, including $C_e$, $C_{\rm down}$, $C_p$ and bounded stopping-deficit losses. The target is conditional on the actual release state, not the state before a holding prefix. Independent end-to-end calibration yields simultaneous intervals for the complete risk vector with
+\begin{equation}
+ \Prob\bigl\{r^{\rm ref}(\mathscr I)\in\mathcal U(D)\bigr\}
+ \ge1-\alpha-\delta_{\rm ref}.
+ \label{eq:wholecoverage}
+\end{equation}
+The probability is over the declared, exchangeable reference episodes; it is not a conditional coverage statement for every road scene. The coherent outer set $\mathcal U(D)$ retains algebraic identities for $I_p$ and $\Delta_p$, and the necessary union-event inequalities $C_p(a)\le C_{\rm down}(a)\le\min\{1,\sum_p C_p(a)\}$. Extra dependencies inferred from shared latent simulations may tighten a \emph{model-conditional} diagnostic set, but may enter the certified set only if independently validated to preserve Eq.~\eqref{eq:wholecoverage}. No cross-world coupling of unobserved human outcomes is required for the marginal-risk contrasts. Appendix~\ref{app:calibration} gives the finite-sample protocol and its reference-label error budget.
+
+\paragraph{Risk admissibility is distinct from choice sufficiency.}
+Let $\mathcal A_{\rm dyn}$ denote lawful, dynamically feasible actions with a defined short-horizon execution procedure, and let $g_j(a;r)\le0$ collect the declared risk constraints: ego contact, downstream \emph{union} contact, and pairwise excess contact probability relative to the prespecified feasible reference $a^0$. A policy-slack constraint is included only for validated encounter geometries. We define
+\begin{equation}
+ \mathcal A_R(D)=\bigl\{a\in\mathcal A_{\rm dyn}:\operatorname{Supp}(a,D)=1,
+ \ \sup_{r\in\mathcal U(D)}g_j(a;r)\le0\ \forall j\bigr\}.
+ \label{eq:robustgate}
+\end{equation}
+In particular, a downstream collision constraint uses $C_{\rm down}(a)\le\varepsilon_{\rm down}$; an increment constraint uses $C_p(a)-C_p(a^0)\le\varepsilon_{{\rm inc},p}$. The latter bounds a \emph{difference of marginal probabilities}, not the unidentifiable cross-world probability of a newly caused collision. If the stronger event is required, a Fr\'echet upper bound is imposed separately (Eq.~\eqref{eq:harm}). Missing source support does not establish physical unsafety, but precludes a reference-law release certificate. A candidate in $\mathcal A_R$ is \emph{risk-admissible under the stated evidence and reference law}; its physical prefix requires an additional independently specified reachability check.
+
+For a bounded objective that ranks actions only after the above constraints are enforced, let $R_{\rm slack}$ aggregate stopping deficits over a scene-level, action-independent set of valid longitudinal encounters. If an encounter loses geometric validity for any compared candidate, its slack coordinate is omitted from the shared ranking objective (while contact risk remains enforced). We write
+\begin{equation}
+ J(a;r)=J_{\rm task}(a)+\lambda_c C_{\rm down}^{r}(a)
+ +\lambda_s R_{\rm slack}^{r}(a)+\lambda_i\sum_p w_p I_p^{r}(a;a^0).
+ \label{eq:decisionobj}
+\end{equation}
+We distinguish two mathematically different comparison questions. The \emph{certified-set regret}
+$\Gamma_R(a)=\sup_{r\in\mathcal U(D)}[J(a;r)-\min_{b\in\mathcal A_R(D)}J(b;r)]_+$
+measures the worst ranking loss among actions already established to be admissible. It is an appropriate conservative execution-set comparison but becomes zero when $\mathcal A_R=\{a\}$. The stronger \emph{plausible-safe regret} compares against actions that satisfy the constraints in the \emph{same} plausible risk world:
+\begin{align}
+ \Gamma_P(a\mid D)
+ &=\sup_{r\in\mathcal U(D)}\left[J(a;r)-
+ \min_{b\in\mathcal A_{\rm dyn}:\,g_j(b;r)\le0\;\forall j}J(b;r)\right]_+\nonumber\\
+ &=\max_{b\in\mathcal A_{\rm dyn}}\ \sup_{\substack{r\in\mathcal U(D)\\g_j(b;r)\le0\;\forall j}}
+ [J(a;r)-J(b;r)]_+.
+ \label{eq:plausibleregret}
+\end{align}
+This definition is evaluated only for $a\in\mathcal A_R(D)$, so its inner benchmark is nonempty. A competitor lacking informative risk evidence receives conservative admissible risk intervals, rather than disappearing from the benchmark merely because it failed certification. As shown in Appendix~\ref{app:regret}, $0\le\Gamma_R(a)\le\Gamma_P(a)$, and $\Gamma_P$ is obtained by finitely many linear programs for affine constraints and a polyhedral risk set.
+
+\paragraph{A two-level release decision.}
+An action receives a \texttt{DECISION-CERTIFIED} status if it belongs to $\mathcal A_R$, satisfies $\Gamma_P(a\mid D)\le\varepsilon_{\rm reg}$, and passes the separate prefix check. This certifies risk admissibility and $\varepsilon_{\rm reg}$-near-optimality against plausible-safe alternatives \emph{under the stated evidence set}. If an action passes the risk gate and prefix check but not the plausible-safe regret test, it is \texttt{RISK-ADMISSIBLE}, not mislabeled unsafe: evidence is sufficient for the specified reference-risk limits, but insufficient for the stronger action-choice claim. The planning policy may query before releasing such an action and, at the deadline, may release only the admissible prefix if the predeclared operational policy permits a risk-only decision. If no risk-admissible candidate exists, or source/physical conditions fail, the state is \texttt{UNCERTIFIED}. In all cases, physically unsupported zero-risk claims are excluded. Crucially, unresolved pairwise comparisons need no further verification when they cannot affect either the robust risk gate or the chosen decision guarantee.
+
+\subsection{TIV: Targeted Independent Verification}
+\label{sec:tiv}
+\paragraph{Evidence witnesses and source-aware queries.}
+Every failed risk-gate test supplies a maximizing risk vector and a binding constraint; every failed choice test supplies a competitor $b^*$ and a joint plausible risk vector $r^*$. For affine risks, the corresponding primal solution and local dual sensitivities identify the risk coordinates with the greatest leverage. CBC traces these coordinates backward through time-respecting guard and response edges to the first uncertain mediator event and the downstream contact/slack minimum. A verification query is
+\begin{equation}
+ q=(\mathcal A_q,\mathcal P_q,\mathcal K_q,[t_1,t_2],v,\nu),
+ \label{eq:query}
+\end{equation}
+where the fields specify candidate actions, affected non-ego pairs, a mediator chain, a delayed event window, an information source, and its fidelity or sample count. The query cannot be justified only by high trajectory entropy. A full candidate-conditioned rollout tests anchor reuse and motion discretization; a separately trained reactive-policy family probes structural model dependence; an interval dynamics/geometry solver tests a specified physical envelope; a genuinely observed agent response after a checked holding prefix changes the actual information state. Extra samples from the \emph{same} biased model only reduce Monte Carlo error and are not treated as independent structural verification. The event witness locates the query; it does not by itself promise that the chosen source is informative.
+
+\paragraph{Decision-valued acquisition and release.}
+Queries are trained and selected using offline, source-specific intervention audits with held-out reference reactors. Denote the no-query execution policy by $\pi_0(\mathscr I)$ and the policy after query response $Z_q$ and latency $T_q$ by $\pi_q(\mathscr I,Z_q,T_q)$. For a declared audit mixture $Q_{\rm audit}$, define
+\begin{align}
+ V(q\mid\mathscr I)=\E_{Q_{\rm audit},Z_q,T_q}\big[&L_{\rm exec}(\pi_0)-L_{\rm exec}(\pi_q)\nonumber\\
+ &-L_{\rm hold}(q,T_q)\mid\mathscr I\big]-\lambda_{\rm comp}c_q.
+ \label{eq:verificationvalue}
+\end{align}
+Execution loss jointly accounts for third-party contact, severity/near-miss deficits, task progress and the cost of an uncertified fallback. A query can have negative value if its source is biased or its answer arrives after the decision deadline. A lightweight acquisition head estimates this signed quantity from the failed-certificate witness, guard sensitivity, audit-source identity and latency; it does not provide a safety bound. Eligible queries additionally require sufficient compute budget, an admissible holding prefix that preserves declared recourse, and deadline feasibility. Brake/hold prefixes are checked for induced rear-chain risk rather than assumed safe. The queries are selected using a frozen developmental surrogate of DSE; only the independent \emph{terminal} risk set can authorize release. The adaptive query/update/stop policy is frozen before that terminal certification pass; terminal certificate failure may veto release but cannot launch another query using the same certification data. At expiry the method executes only a separately checked available prefix or reports \texttt{UNCERTIFIED} to an external operational safety controller. Appendix~\ref{app:queryimpl} gives the execution procedure and latency/source audits.
+
+\section{Evaluation Protocol and Falsification Criteria}
+\label{sec:evaluation}
+We evaluate on a naturally sampled, pre-frozen scene distribution and on a separate, pre-registered boundary-enriched challenge set; their collision frequencies are never pooled. A minimal mechanism test matches two ego-safe lane-change candidates with equivalent intent, route progress and comfort but different acceleration timing. A first responder $B$ may switch braking mode; a delayed follower $C$ may then cross a stopping/contact boundary. Background collisions with zero ego increment, physically disconnected negative controls, mode-switch-free near-neighbor actions, and varying follower policies are included. Controlled mediator interventions are evaluated under multiple independent closed-loop reactor families, with structural-family and coupling sensitivity reported explicitly.
+
+For response discrimination (RQ1/RQ2), report event-onset and policy-latency errors, third-party signed clearance/slack accuracy, contact union-risk calibration, matched-action contrast sign errors and conditional failures of anchor reuse, stratified by ego geometric distance and guard exceptional mass. Control for trajectory ADE, action proposal set, number of reactive-model calls and actual wall-clock latency. For planning reliability (RQ3), report risk-admissible and decision-certified coverage separately, $\Gamma_R$ and $\Gamma_P$, accepted-action downstream union collision and ego-induced marginal risk, risk--coverage curves, reference-risk simultaneous coverage, empirically audited conditional-on-release risk, abstention and task progress. Query comparisons use equal latency/compute budgets and include random, entropy, ensemble-disagreement and SIGMA-style expected-planning-gain allocation. Baselines include INTERACT with its native trust-region refinement, full action-conditioned prediction, ordinary third-party risk penalties, non-hybrid CBC, regret restricted to robustly gated actions, and variants without source-independent TIV.
+
+In particular, failure of the guard exceptional-mass bound inside a verified structural family falsifies the corresponding model assumptions; systematic undercoverage on held-out exchangeable reference episodes falsifies the calibration implementation; and no improvement over equal-budget full prediction or existing selective-reasoning baselines weakens the claimed algorithmic benefit. Independence is assessed by excluding training scene clusters, response-model families and source-audit targets at the appropriate stages. Neither natural-log replay nor a closed-loop simulation is presented as direct evidence of an unobserved real-world counterfactual.
+
+\subsection{Metric definitions and denominators}
+\label{sec:metricdefs}
+All primary CBC metrics are defined on a pre-outcome, scene-clustered
+analysis set.  For a matched candidate pair $(a,b)$ and non-ego pair $p$, let
+$\Delta^{\rm ref}_{abp}=C_p^{\rm ref}(a)-C_p^{\rm ref}(b)$ and
+$\widehat\Delta_{abp}$ be the predicted contrast.  A pair is \emph{critical}
+when $|\Delta^{\rm ref}_{abp}|\ge\delta$; it is \emph{reference-resolved}
+only when the conservative finite-reference Monte Carlo radius $r_{\rm MC}$
+also satisfies $|\Delta^{\rm ref}_{abp}|>r_{\rm MC}$.  The strict critical-sign
+error is
+\[
+ E_{\rm sign}=\mathbf 1\{ |\widehat\Delta_{abp}|\ge\tau_{\rm det},\;
+ \operatorname{sgn}(\widehat\Delta_{abp})\ne
+ \operatorname{sgn}(\Delta^{\rm ref}_{abp})\},
+\]
+whereas critical underresolution is
+$E_{\rm under}=\mathbf 1\{|\widehat\Delta_{abp}|<\tau_{\rm det}\}$.
+We report $E_{\rm miss}=E_{\rm sign}\lor E_{\rm under}$ separately from both
+components.  The denominator is the reference-resolved critical set; pair
+rows within a scene are not treated as independent, and confidence intervals
+use scene-cluster bootstrap.
+
+A false-safe reuse is a pair for which the frozen CBC boundary gate authorizes
+anchor reuse while a held-out reference paired rollout shows a critical outcome
+flip or a risk contrast above the predeclared threshold.  We report its rate
+among reused pairs and its scene-level rate; the gate is never called a safety
+certificate without a verified complete guard envelope.  Event recall and
+lead time require an explicit held-out event label and a predicted trigger:
+$L=t_{\rm event}^{\rm ref}-t_{\rm trigger}$, so positive $L$ means an early
+trigger and negative $L$ means a late miss.  A guard-flip summary without a
+trigger timestamp is not event recall.
+
+Ego-safe downstream regret is evaluated only on candidates that are
+pre-outcome intent-matched, route-legal, dynamically feasible, and both
+ego-safe under the declared reference law.  It compares the released action's
+full task--risk objective with the best reference action in that restricted
+set; the valid denominator and abstention rate are reported together.  A
+reference pair flip is estimated from the same latent draw for both actions,
+with a binomial Monte Carlo interval for each pair and a scene-cluster interval
+for the aggregate.  It is a coupling-specific simulator diagnostic, not an
+individual human causal probability.
+
+Runtime is reported from the planning-callback entry to action release, with
+p50/p95/p99 for total, anchor, graph, fallback, calibration, and ranking
+components, plus deadline misses, callbacks per 100 plans, rollout calls per
+100 plans, reuse, and fallback fractions.  Record-generation timing is labeled
+as offline and cannot substitute for this benchmark.  Candidate yield is
+reported in stages: candidate $\rightarrow$ intent-matched $\rightarrow$
+dynamically feasible $\rightarrow$ route-legal $\rightarrow$ both-ego-safe
+$\rightarrow$ reference-resolved critical.  Missing route legality remains
+unknown rather than being counted as legal.  Rare-risk calibration is
+stratified by TTC/headway or stopping-slack, guard distance, event type,
+risk bin, and reference policy family; each stratum reports count, reliability
+against the finite reference mean, upper-tail error, and its held-out
+uncertainty.
+
+\subsection{Exploratory CBC Reanalysis: Evidence Before Scale-Up}
+\label{sec:cbc-pilot}
+The following values constitute a \emph{simulator-conditional diagnostic}
+from the released CBC-first implementation, not a final benchmark or
+real-world counterfactual result. Two separately evaluated sets each contain
+120 held-out scenes: a deliberately enriched synthetic four-vehicle stress
+set, and geometric corridor scenes initialized from observed WOMD states.
+The WOMD log supplies the current state and at most ten preceding history
+steps; outcomes for unexecuted ego alternatives are instead generated by
+synthetic, conditional-response reference policies. Thus ``WOMD-initialized''
+does not mean ``WOMD-observed counterfactual collisions.'' In both sets,
+a matched pair shares maneuver intent subject to a frozen kinematic proxy,
+which is not a road-rule or lane-topology certificate.
+\begin{table}[t]
+\centering\small
+\caption{Exploratory CBC study: distinct denominators and missing evidence.
+All risk flips are conditional on the synthetic reference-policy families;
+multiple non-ego pairs within a scene are dependent observations.}
+\label{tab:cbc-preliminary}
+\begin{tabular}{lrr}
+\toprule
+Diagnostic & Synthetic stress & WOMD initialized \\
+\midrule
+Held-out scenes & 120 & 120 \\
+Kinematically matched scenes & 120 & 15 \\
+Matched and both ego-safe scenes & 100 & 0 \\
+Reference-resolved critical non-ego pairs & 32 & 0 \\
+Reference pair-outcome flips, all pairs & $107/360$ & $3/360$ \\
+Reference pair-outcome flips, matched subset & $107/360$ & $0/45$ \\
+\midrule
+Full CBC: resolved-pair sign error & $6.25\%$ & n/a \\
+No-event-features: resolved-pair sign error & $6.25\%$ & n/a \\
+Single-anchor, no graph: sign error & $21.875\%$ & n/a \\
+Single-anchor with delayed graph: sign error & $31.25\%$ & n/a \\
+Uncorrected single-anchor copy: sign error & $100\%$ & n/a \\
+\bottomrule
+\end{tabular}
+\end{table}
+The synthetic stress test supports the \emph{existence} of action-dependent
+third-party collision changes within its own structural model. It does not
+establish their prevalence, human-driver response probabilities, or
+transportability to naturalistic driving. Moreover, although a graph is
+better than copying the anchor unchanged, it is \emph{worse} than the
+same-anchor, non-graph control on the decisive error metric. Explicit event
+features make no improvement over their matched non-event control. Thus the
+current evidence fails to establish the \emph{incremental} utility of those
+CBC components. The observationally initialized evaluation cannot test the
+risk-ranking hypothesis: among its 15 kinematically matched scenes, none is
+both ego-safe under both synthetic alternatives, and no matched pair has a
+reference-resolved critical risk contrast. The three reference flips among
+all 360 WOMD-initialized pair comparisons occur \emph{outside} the matched
+subset and therefore cannot substantiate RQ1's matched-action claim.
+
+The preliminary reuse screen is also \emph{not} a physical certificate:
+it reuses $248/360$ synthetic pair comparisons, yet misses 6 of 107
+synthetic reference outcome flips; the nominal 95\% binomial upper error
+fraction of approximately 10.8\% does not account for within-scene pair
+correlation. It neither validates Eq.~\eqref{eq:guardbounds} nor supports
+risk authorization. An experiment should first establish a non-zero yield of
+pre-outcome matched, legal and both-ego-safe candidate pairs, then run a
+pre-registered, clustered risk-contrast study using held-out reactive model
+families and sufficient reference Monte Carlo draws. Reference sign
+confidence must be checked independently of candidate selection, with
+scene-clustered uncertainty and naturally sampled versus stress-set rates
+reported separately. No DSE/TIV safety claim follows from these pilot data.
+
+\section{Discussion and Limitations}
+\label{sec:limits}
+The boundary-invariance implication is only as complete as the declared guard set and physical incremental bounds. Learned guards and novel driver modes may remain unsupported, in which case the bound cannot authorize anchor reuse. A simulator-specific coupling does not identify the probability that an individual real driver changes collision status under two counterfactual ego actions. A policy-conditioned stopping deficit is not a two-dimensional collision certificate, and a feasible emergency maneuver is not necessarily executed by a human driver. Plausible-safe regret deliberately compares against alternatives that are safe in only some credible worlds; this strengthens the choice claim but may lower decision-certified coverage without affecting the validity of a risk-admissible action. Whole-episode conformal intervals yield marginal reference-law coverage, not arbitrary scene-conditional guarantees, and the released-risk bound can be loose for rare release events. None of these statistical results is guaranteed to transfer to an unseen real-world response law. When the algorithm cannot justify a checked prefix or the query latency exceeds the deadline, operational behavior requires a separately verified safety controller.
+
+\paragraph{Implications of the current pilot.}
+The observed zero yield of simultaneously matched and ego-safe
+WOMD-initialized alternatives is an experimental-design failure mode, not
+negative evidence that cascades never occur in actual traffic. The fixed
+straight-lane, four-car reduction currently lacks a verified map-topology,
+traffic-rule and navigation-route check; it also discards traffic complexity
+outside its selected four actors during its reference rollouts. A learned
+response family trained on naturalistic logs cannot supply valid labels for
+unexecuted interventions without extra structural assumptions. Future tests
+must retain full scene geometry, pre-register action generation before
+response labels, audit headway and brake-onset statistics from observation
+only, and use multiple source-independent interactive simulators. The
+available direct event mask is also weaker than a dynamical event ablation:
+full source predictions already encode braking. Reported savings in source
+reactor invocations cannot be interpreted as measured inference latency.
+
+\section{Conclusion}
+CaVER couples event-sensitive multihop response contrast, explicit risk and choice certificates, and targeted independent verification for planning under cascading traffic reactions. The method localizes where intent-matched ego actions may cease to be response-equivalent, distinguishes safe-to-admit from well-supported-to-choose, and identifies the evidence that could change either conclusion. Its physical, structural-model and statistical statements have separate assumptions and falsifiable evaluation targets.
+
+\appendix
+\section{Candidate Construction, Counterfactual Scope, and Response Policies}
+\label{app:actions}
+At replanning time $t$, the state $s=(\mathcal M,\mathcal R,\mathcal H_{0:N},\mathcal T_{\rm law})$ contains road geometry, route, recorded joint history, and current rules. A finite candidate set is generated from shared-intent anchors and dynamically integrated control splines. Candidate matching is fixed before observing downstream outcomes: two actions share lane/gap intent and satisfy an ego-state metric and task-cost tolerance,
+\begin{equation}
+ d_e(a,b)=\frac1T\sum_{k=1}^{T}\left(
+ \frac{\|p_e^a(t_k)-p_e^b(t_k)\|}{s_p}+
+ \frac{|v_e^a(t_k)-v_e^b(t_k)|}{s_v}+
+ \frac{|\dot v_e^a(t_k)-\dot v_e^b(t_k)|}{s_a}\right)
+ \le\delta_e,\quad |J_{\rm task}(a)-J_{\rm task}(b)|\le\delta_J.
+ \label{eq:matchapp}
+\end{equation}
+Matching is an evaluation/control variable, not an assumption that the two actions induce equivalent reactions. The feasible reference $a^0$ is chosen by a scene-only rule (e.g., valid lane keeping or yielding), independently of any predicted collision outcome; it is not presumed physically safe. If no such reference exists, reference-relative quantities are omitted rather than defined from a nonexistent trajectory. Safety pairs $\mathcal G_S$ are screened conservatively using reachable swept footprints, including agents not assigned a large influence-network weight.
+
+\section{Structural Response Worlds and Observational Identification}
+\label{app:world}
+\paragraph{Structural and observational response laws.}
+For a declared reactive-policy family $m$, let $z=(z_g,z_1,\ldots,z_N,\epsilon)$ contain persistent driver modes and capabilities, common environmental conditions, and future innovations. Its response equations are
+\begin{equation}
+ u^a_{i,t}=\pi_{m,\kappa_i}(o^a_{i,\le t-\tau_i};z_i,\epsilon_{i,t}),\quad
+ x^a_{i,t+1}=f_i(x^a_{i,t},u^a_{i,t};z_i),\qquad x^a_{e,t}=X_e^a(t).
+ \label{eq:scmapp}
+\end{equation}
+Reaction timing, braking strength, sensor visibility and acceleration limits are explicit inputs. Correlated response policies may share $z_g$; independent reaction means conditional autonomy of each agent's controller, not probabilistic independence among trajectories. Reusing $z$ across candidate interventions defines a \emph{simulator-specific} structural coupling. A WOMD/nuPlan observation has only one logged ego intervention; it does not identify both potential outcomes of a single human driver. Naturalistic histories can supervise response parameters and constrain their plausible ranges. Coupling-specific mediation/flip diagnostics are reported separately from intervention-marginal risk contrasts. For a mediator $B$, a model-relative path test intervenes on $B$'s policy or response state while resimulating other reactive agents, rather than freezing downstream $C$ and falsely interpreting the resulting response as causal.
+
+\section{Cross-World Events and Policy-Conditioned Recoverability}
+\label{app:identification}
+\begin{proposition}[Sharp binary transition bounds]\label{prop:frechet}
+For two binary intervention outcomes $F_a,F_b$ with marginal probabilities $p_a,p_b$ under the same declared response law, but unspecified joint distribution, the flip and one-sided harmful-transition probabilities satisfy Eqs.~\eqref{eq:frechet} and \eqref{eq:harm}. Every endpoint is attained by some valid coupling.
+\end{proposition}
+\begin{proof}
+With $z=\Pr(F_a=1,F_b=1)$, the four cells are $(z,p_a-z,p_b-z,1-p_a-p_b+z)$. Nonnegativity is equivalent to $\max(0,p_a+p_b-1)\le z\le\min(p_a,p_b)$. Substitute these endpoints into $\Pr(F_a\ne F_b)=p_a+p_b-2z$ and $\Pr(F_a=1,F_b=0)=p_a-z$. Both endpoint tables are valid, proving sharpness.
+\end{proof}
+For simultaneously covered marginal intervals $p_a\in[\underline p_a,\overline p_a]$ and $p_b\in[\underline p_b,\overline p_b]$, valid conservative one-sided bounds are $[\underline H,\overline H]$ with
+\begin{equation}
+ \underline H=\max\{0,\underline p_a-\overline p_b\},\qquad
+ \overline H=\min\{\overline p_a,1-\underline p_b\}.
+ \label{eq:uncertainharm}
+\end{equation}
+The risk increment $p_a-p_b$ is identified if both intervention marginals are identified, but the individual-world harmful-transition rate is not. In particular, a small incremental probability does not establish that no individual response world switches from safe to unsafe. A structural common-random-number simulator can estimate its own coupling-specific $\Pr_m(F_a=1,F_b=0)$; the result cannot be promoted to a real-world individual causal probability solely through latent matching. Conditioning on measured driver covariates tightens the above partial-identification bounds only when the conditional intervention marginals are also valid.
+
+\section{Policy-Conditioned Recoverability and Physical Viability}
+\label{app:recovery}
+\paragraph{Contact, stopping response, and recovery.}
+Signed swept-footprint clearance is evaluated using continuous-time collision checking or a bounded temporal discretization error. A nonpositive $m_p^{\rm col}$ indicates contact in the evaluated trajectory. The stopping slack in Eq.~\eqref{eq:stop} is evaluated only for a consistent longitudinal leader--follower configuration with positive effective braking and clearly defined detection-to-brake delay. Its physical terms are gap, distance traveled before response, follower braking distance and leader braking distance; it is not a general two-dimensional contact certificate \parencite{shalev2017rss,durrani2024new}. With parameter uncertainty, $m_p^\pi$ is computed per policy sample or over parameter intervals, never using a mean delay as a deterministic bound. Define a bounded stopping-deficit loss $\ell_{p,\rm slack}=\min\{1,[b_s-m_p^\pi]_+/d_s\}$ only when its encounter-validity flag is true. Contact and stopping deficits remain separately calibrated targets.
+
+Physical recoverability is an existential reachability property, whereas behavioral recoverability depends on the driver's actual policy. Against a fixed continuation $V$ of other agents, define
+\begin{equation}
+ m_p^{\rm ex}(a,V)=\sup_{\pi_j\in\Pi_j^{\rm rec}}\ \min_{t\le H}
+ \operatorname{sd}(\mathcal B_i(V_i(t)),\mathcal B_j(Y_j^{\pi_j,V}(t))),
+ \label{eq:exrecover}
+\end{equation}
+and, against a specified feedback-closed set of continuations,
+\begin{equation}
+ m_p^{\rm rob}(a)=\sup_{\pi_j\in\Pi_j^{\rm rec}}
+ \inf_{V\in\mathcal V_j(s,a)}\min_{t\le H}
+ \operatorname{sd}(\mathcal B_i(V_i(t)),\mathcal B_j(Y_j^{\pi_j,V}(t))).
+ \label{eq:robrecover}
+\end{equation}
+The supremum ranges over feasible nonanticipative feedback policies and actual acceleration, jerk, sensing and steering limits. A successful optimized response in one known future is not evidence that the human driver will execute it, nor that it remains safe if another agent reacts. A verified feasible policy with a certified worst-case lower margin is needed before a robust positive-clearance claim. These diagnostics do not replace contact checks across the complete fleet: avoiding a $B$--$C$ conflict while causing a new $C$--$D$ collision is not global recovery.
+
+\section{CBC: Hybrid Event Graph and Boundary-Propagation Certificate}
+\label{app:cbcimpl}
+\paragraph{Event-conditioned architecture.}
+A motion backbone processes map and observed history; an action encoder processes the continuous ego controls relative to an anchor. A policy head outputs a mixture over hazard detection, response-onset, yielding/braking mode, effective deceleration and latency. A sparse causal-time event graph carries only messages that are observable to each receiver by the specified delay. Its within-mode residual head follows Eq.~\eqref{eq:transport}; an integrator enforces vehicle kinematics and keeps ego actions fixed. For the learned CBC residual, the graph encoder optionally transports messages with the response-arrival kernel in Eq.~\eqref{eq:kerneltransport}. The graph summary is concatenated to the joint ego and downstream-union head rather than being used only by a pair head. A boundary-local variant pools the final event-weighted window instead of averaging the complete horizon. A guard head outputs signed guard scores or intervals, mode probabilities and the location of the first potential branch. During inference, the verifier first propagates certified event bounds. Mode-stable branches use the residual head; ambiguous guards lead to mode-specific structural rollouts. The predicted graph is not itself assumed to be a causal graph of the real road, and mediator swaps are interpreted within their declared structural simulator.
+
+\label{app:hybridlemma}
+\begin{assumption}[Complete time-causal guards]\label{ass:hybrid}
+On the finite horizon and within a declared compact family of policy and disturbance parameters, the structural reactor has finitely many ordered response guards, including all guards that can alter any screened third-party contact event. Conditional on identical earlier mode decisions, Eq.~\eqref{eq:guardbounds} has verified bounds for every reachable guard and all continuous swept contact clearances. Temporal interpolation, observation/actuation delay, mode-entry transients and numerical errors are included. A missing/unbounded term is represented by an infinite bound.
+\end{assumption}
+\begin{proposition}[Boundary-localized contact invariance]\label{prop:hybridboundary}
+Under Assumption~\ref{ass:hybrid}, if $z\notin\mathfrak B(a\mid\bar a)$, every screened third-party contact indicator is the same for $a$ and $\bar a$. Consequently Eq.~\eqref{eq:boundarymass} holds for any probability law over the declared structural worlds. The same conclusion holds pairwise for $a,b$ if neither has a boundary exception relative to a common anchor in the given world.
+\end{proposition}
+\begin{proof}
+Suppose the mode histories first differ at a guard $\gamma$. All earlier guards agree, so the verified conditional guard bound applies. A sign change requires $|g_\gamma^{\bar a}(z)|\le|g_\gamma^{a}(z)-g_\gamma^{\bar a}(z)|\le e_\gamma$, contradicting $z\notin\mathfrak B$. Thus modes agree throughout the horizon. Under the common mode history, a contact-indicator change for a pair $p$ requires its signed minimum clearance to cross zero and hence $|m_p^{\rm col}(\bar a,z)|\le e_p$, the second excluded event. Therefore the downstream union indicators also coincide outside $\mathfrak B$. Their expectation difference is at most $\Pr_m(\mathfrak B)$ since $|\mathbb E F_a-\mathbb E F_{\bar a}|\le\mathbb E|F_a-F_{\bar a}|$. Applying the argument to each candidate against the anchor proves the final statement.
+\end{proof}
+This result is \emph{conditional on the complete structural guard model}. It neither identifies an individual-world flip probability from observational driving data nor certifies an omitted driver policy. If $K$ independent latent draws from a fixed source law permit exact evaluation of the event $\mathfrak B$, a finite-sample upper confidence bound is
+\begin{equation}
+ \beta_{\rm bd}=\min\!\left\{1,\ \frac1K\sum_{k=1}^K\ind\{z^k\in\mathfrak B\}
+ +\sqrt{\frac{\log(1/\delta_{\rm bd})}{2K}}\right\}.
+ \label{eq:bdmassestimate}
+\end{equation}
+This is a source-conditional Hoeffding bound with confidence $1-\delta_{\rm bd}$; it does not include structural-model bias. Its use within a statistically certified reference risk set requires a separately justified allowance for source-to-reference mismatch. Otherwise it is used only for source-specific prediction reuse and prioritization.
+
+\paragraph{Delayed physical perturbation tube.}
+For mode-stable response trajectories, let $d_i(t)$ bound a norm of candidate-to-anchor state difference. With validated, nonnegative incremental gains on the compact region,
+\begin{equation}
+ d_i(t+1)\le A_i(t)d_i(t)+\sum_{j\in\operatorname{Pred}(i,t)}G_{ij}(t)d_j(t-d_{ij})
+ +u_i^e(t)+\zeta_i(t),\qquad d_i(0)=0.
+ \label{eq:tuberec}
+\end{equation}
+Iterating the right-hand side yields an upper tube $\bar d_i(t)$, whose unrolling contains products over time-respecting response paths. Delays, branch gains, and depth all affect this bound; a fixed depth multiplier is neither necessary nor valid. With a validated pose-to-footprint Lipschitz bound, including a geometric sweep allowance $E_p^{\rm sweep}$,
+\begin{equation}
+ m_p^{\rm col}(a)\ge m_p^{\rm col}(\bar a)-
+ \max_{t\le H}[\bar d_i^{\rm pose}(t)+\bar d_j^{\rm pose}(t)]-E_p^{\rm sweep}.
+ \label{eq:clearancetube}
+\end{equation}
+Induction over the causal time order proves $d_i\le\bar d_i$: $A_i,G_{ij}\ge0$ preserve each predecessor inequality. The geometric Lipschitz inequality then gives the minimum-clearance bound. This reasoning fails at an unmodeled mode switch; the guard test is therefore logically prior to application of the continuous tube. A verified positive clearance excludes contact only inside the declared dynamics/driver envelope, not for all possible human behavior.
+
+\section{CBC: Boundary-Oriented Learning and Statistical Error Models}
+\label{app:cbctrain}
+\paragraph{Training targets and risk coherence.}
+Pretrain joint traffic responses on logged histories using a SMART-compatible backbone \parencite{wu2024smart}. Generate pairs of interventions from a common state using multiple structurally different responsive traffic families; raw log replay is never used as a counterfactual target. Train on fine-grid brake/detection onset, policy-class uncertainty, response latency, effective braking, swept contact, longitudinal margin (with encounter-validity mask), joint downstream union contact, and matched-action risk contrast. Event times are represented by onset quantiles together with presence and right-censor masks. A missing event is never encoded as a numeric onset value. A representative training loss is
+\begin{align}
+ \mathcal L_{\rm CBC}={}&\lambda_Y\mathcal L_{\rm traj}+\lambda_t\mathcal L_{\rm onset}
+ +\lambda_g\mathcal L_{\rm guard}+\lambda_m\mathcal L_{\rm margin}\nonumber\\
+ &+\lambda_C\mathcal L_{\rm contact}+\lambda_U\mathcal L_{\rm union}
+ +\lambda_\Delta\mathcal L_{\rm contrast}
+ +\lambda_D\mathcal L_{\rm decision}.
+ \label{eq:cbcloss}
+\end{align}
+The event/margin terms supervise the physical source of a downstream risk change. The contrast term fits $v_\psi(a,p)-v_\psi(b,p)$ to independently audited intervention-specific risk differences, rather than training an unconstrained pair classifier. The decision term penalizes a decision induced by the predicted model when it disagrees with a reference-reactor constrained oracle, where such an oracle is available. An independent bias head learns the difference between source estimates and held-out reference risk, not the residual of a model against itself. Risk head calibration remains a separate step. Training may upsample boundary-near and high-contrast scenes, while evaluation on naturally sampled scenes preserves their base rates. Pairwise contrast labels from a fixed shared-seed coupling are labeled simulator-conditional, not true individual causal outcomes. Event heads are used for boundary localization and query routing unless an event-replacement ablation demonstrates an incremental ranking effect under equal capacity and update budgets.
+
+For an event type $e$, the event target is
+\begin{equation}
+ y_e=\left(q_{.1}(t_e),q_{.5}(t_e),q_{.9}(t_e),
+ z_e^{\rm present},z_e^{\rm censored}\right),
+ \qquad z_e^{\rm present}+z_e^{\rm censored}=1,
+ \label{eq:eventtarget}
+\end{equation}
+where the onset quantiles are defined only when $z_e^{\rm present}=1$. The
+onset loss is masked for right-censored events and includes a binary presence
+term. This representation separates an event outside the horizon from an
+observed onset at zero. The event head supplies a trigger interval to the
+boundary gate and TIV witness, while the contact and union heads remain the
+primary action-risk outputs.
+
+\paragraph{Statistical boundary envelope.}
+A response head also estimates a nonnegative error scale $\sigma_p(s,a,\bar a)$ from ego action distance, driver mode, path gains and depth, delay uncertainty, anchor quality and distance to relevant guards. Against independent reference responses, the calibration target is the \emph{entire} anchor-plus-residual prediction error, not only residual-head error. For fixed candidate/scene generation and calibration episodes indexed by $l$, a whole-scene score may be
+\begin{equation}
+ S_l^{\rm bd}=\max_{(a,p)\in\mathcal Q_l}
+ \frac{[\,|m_{p,l}^{\rm ref}(a)-\hat m_{p,l}(a)|-E_{p,l}^{\rm geom}\,]_+}
+ {\sigma_{p,l}+\sigma_0}.
+ \label{eq:boundaryscore}
+\end{equation}
+The finite-sample conformal quantile $q_{1-\alpha_{\rm bd}}$ yields a reference-law envelope $E_{p,l}^{\rm geom}+q_{1-\alpha_{\rm bd}}(\sigma_p+\sigma_0)$ with marginal simultaneous coverage over the frozen family $\mathcal Q_l$. The geometry term is deterministic only if its tolerance is verified; other mismatch is statistical under the audited reference distribution. This interval cannot be substituted for the physical guard bound $e_\gamma$. In particular, a reference-model distribution shift voids its advertised coverage. The final DSE risk-vector calibration is separate and takes precedence over this auxiliary screening envelope.
+
+\section{DSE: Regret Certificates, Risk-Set Construction, and Proofs}
+\label{app:regret}
+\paragraph{Coherent risk polytope.}
+The terminal risk set contains coordinates for all release-relevant candidates and contact/slack constraints. It starts from calibrated simultaneous marginal intervals and imposes exact algebraic identities $I_p(a;a^0)=C_p(a)-C_p(a^0)$, $\Delta_p(a,b)=R_p(a)-R_p(b)$ and valid inequalities $0\le C_p(a)\le C_{\rm down}(a)\le\min\{1,\sum_pC_p(a)\}$. Restrictions imported from simulator latent couplings or a particular policy mixture are allowed in a \emph{certified} set only when the target reference vector remains covered. If this cannot be validated, use the outer interval polytope, even when it is conservative. An empty set caused by contradictory intervals is an error/unknown condition rather than a reason to select the optimizer's favorite feasible projection. If a competitor is lawful but its risk is unsupported, its comparator coordinates may range over the physically possible interval $[0,1]$; it is not removed merely for failing a learning-model support check. In contrast, an unsupported \emph{selected} action fails Eq.~\eqref{eq:robustgate}.
+
+\begin{proposition}[Safety and selection are separate certificates]\label{prop:regret}
+Let $\mathcal U(D)$ be nonempty and compact, $\mathcal A_{\rm dyn}$ finite, and $a\in\mathcal A_R(D)$. With the same objective and pointwise risk constraints as in Section~\ref{sec:dse}, $0\le\Gamma_R(a)\le\Gamma_P(a)$. Furthermore, if $\mathcal U(D)$ is a compact polytope and $J$ and all $g_j$ are affine in $r$, then
+\begin{equation}
+ \Gamma_P(a)=\max\left\{0,\ \max_{b\in\mathcal A_{\rm dyn}}
+ \underset{r\in\mathcal U(D),\ g_j(b;r)\le0\ \forall j}{\operatorname{max}}
+ [J(a;r)-J(b;r)]\right\},
+ \label{eq:regretLP}
+\end{equation}
+where infeasible subproblems are ignored. Thus $\Gamma_P$ can be computed using at most $|\mathcal A_{\rm dyn}|$ linear programs, and $\Gamma_P(a)\le\varepsilon_{\rm reg}$ implies that $a$ is $\varepsilon_{\rm reg}$-optimal among pointwise risk-feasible candidates for \emph{every} $r\in\mathcal U(D)$.
+\end{proposition}
+\begin{proof}
+Every robustly admissible candidate is feasible in every $r$, hence $\mathcal A_R(D)\subseteq\{b\in\mathcal A_{\rm dyn}:g_j(b;r)\le0\ \forall j\}$ for every $r$. Taking a minimum over the larger set can only increase the regret, proving $\Gamma_R\le\Gamma_P$. For fixed $r$, the difference between $J(a;r)$ and the minimum feasible cost equals the maximum over all feasible competitors of $J(a;r)-J(b;r)$. The finite maximization over $b$ commutes with the supremum over feasible $(r,b)$, yielding Eq.~\eqref{eq:regretLP}. Each subproblem has a linear objective and a polyhedral feasible region. The last statement follows directly from the definition.
+\end{proof}
+A two-world counterexample exposes the scope difference. Suppose $a$ is feasible in both $r_1,r_2$ and costs $5$; $b$ costs $1$ and is feasible only in $r_1$. Then $\mathcal A_R=\{a\}$ and $\Gamma_R(a)=0$, whereas $\Gamma_P(a)=4$. This does \emph{not} make executing $a$ unsafe. It says that the evidence does not rule out a materially better feasible choice. Conversely, treating $\Gamma_P\le\varepsilon_{\rm reg}$ as mandatory for every safety-only release would conflate efficiency uncertainty with a safety failure and could cause unnecessary abstention. The two-level status in Section~\ref{sec:dse} preserves this distinction.
+
+\paragraph{Worst-case evidence witnesses.}
+If $a$ fails the risk gate, maximize each $g_j(a;r)$ over $\mathcal U(D)$ and save the maximizing vector and active constraint. If $a$ is risk-admissible but fails the strong choice test, Eq.~\eqref{eq:regretLP} yields $(b^*,r^*)$ and a primal objective gap. LP dual multipliers indicate local sensitivity to interval widths or source constraints while the optimal basis is unchanged; they are \emph{not} themselves a probability or a guaranteed query benefit. Evidence coordinates are mapped to the earliest reachable guard event and downstream pair using CBC's time-indexed interaction graph. A contradiction from an independent source widens the model discrepancy allowance or flags unsupported status; the planner must not project it away to manufacture a certificate.
+
+\section{DSE: End-to-End Calibration and Release Risk}
+\label{app:calibration}
+\paragraph{Release-state conditional targets.}
+Freeze all candidate generation, CBC weights, source-selection rules, provisional query intervals, acquisition policy, query stopping, holding-prefix updates and reference-law specification using training/development episodes. The independent final certification set must not be queried to adapt that workflow. Let $\mathscr I_l$ denote the resulting complete pre-certification information at the release time of episode $l$, including the actual state after the holding prefix and all computed query outcomes. For each releasable candidate $a$, define
+\begin{equation}
+ \mu_{l,a}^{\rm ref}=\Pr_{P^{\rm ref}}(F_{l,a}^{\rm down}=1\mid\mathscr I_l),
+ \label{eq:releasedrisk}
+\end{equation}
+with an \emph{independent} future continuation of the reference traffic process from that state. Similar conditional-mean targets are required for ego contact, pair contact, and all decision constraints. Computed extra predictions do not by themselves observe the actual hidden driver type; real post-hold measurements do. Evaluation of $\mu_{l,a}^{\rm ref}$ may require expensive posterior-conditional reference sampling; without a valid label/evaluation protocol, a conditional-risk certificate is not claimed.
+
+For $n$ complete independent certification episodes, the frozen method produces initial intervals $[L_{l,j},U_{l,j}]$ and positive scales $\sigma_{l,j}+\sigma_0$ for every release-relevant risk coordinate $j\in\mathcal Q(\mathscr I_l)$. With reference conditional means, define the entire-episode score
+\begin{equation}
+ S_l=\max_{j\in\mathcal Q(\mathscr I_l)}
+ \frac{\max\{L_{l,j}-\mu_{l,j}^{\rm ref},\,\mu_{l,j}^{\rm ref}-U_{l,j},\,0\}}
+ {\sigma_{l,j}+\sigma_0}.
+ \label{eq:calall}
+\end{equation}
+Take $k=\lceil(n+1)(1-\alpha)\rceil$ and let $q_\alpha$ be the $k$-th smallest calibration score, or $+\infty$ if $k=n+1$. Expand every interval by $q_\alpha(\sigma_{l,j}+\sigma_0)$ before intersecting with \emph{known-valid} coherent constraints. The entire-scene maximum accounts for adaptive candidate selection at the fixed stopping state and simultaneous coordinates; it does not establish per-scene conditional coverage.
+
+\begin{proposition}[Whole-episode simultaneous coverage]\label{prop:coverage}
+Assume certification and test episodes are exchangeable after the entire query/update/stopping policy has been frozen on disjoint development data. Assume the conditional reference means in Eq.~\eqref{eq:calall} are known exactly. Then with probability at least $1-\alpha$, all target coordinates of the fresh release state lie in their expanded intervals simultaneously. If conservative upper calibration scores computed using independent reference-mean enclosures dominate all exact calibration scores jointly with probability at least $1-\delta_{\rm ref}$, the bound becomes $1-\alpha-\delta_{\rm ref}$.
+\end{proposition}
+\begin{proof}
+For exact targets, the $n$ calibration scores and the test score are exchangeable under the fixed procedure. The split-conformal rank argument gives $\Pr(S_{n+1}\le q_\alpha)\ge1-\alpha$ (with conservative treatment of ties). By the definition of the maximum, this event simultaneously covers all target coordinates. On the joint calibration-label enclosure event, every estimated upper score dominates its exact counterpart, so its order statistic cannot be smaller than the exact-score order statistic. Combining the two events by a union bound yields $1-\alpha-\delta_{\rm ref}$.
+\end{proof}
+\paragraph{Reference Monte Carlo accuracy.}
+If reference means are Monte Carlo estimated, the enclosures used to upper-bound the \emph{calibration} scores must have a joint failure budget across all $n$ episodes and coordinates, not an unchecked per-target confidence statement. For a Bernoulli coordinate estimated from $K_{l,j}$ conditionally independent reference continuations, a valid pointwise Hoeffding radius is $\sqrt{\log(2N_{\rm cal}/\delta_{\rm ref})/(2K_{l,j})}$, where $N_{\rm cal}$ is the number of assessed calibration targets. Apply a union bound to obtain all target enclosures and compute scores with the worst endpoint. This may be expensive for rare contact probabilities; the required label fidelity is a practical limitation, not a result that can be assumed away.
+
+\begin{proposition}[Reference-law marginal risk of released actions]\label{prop:gate}
+Let $\mathsf A$ be the event that the frozen planner passes independent terminal certification and releases an action $a(\mathscr I,q_\alpha)$. Suppose the future reference continuation is conditionally independent of certification data given $\mathscr I$. Suppose the complete risk vector in the terminal uncertainty set is jointly covered with probability at least $1-\alpha-\delta_{\rm ref}$ and every released action satisfies $\sup_{r\in\mathcal U(D)}C_{\rm down}^r(a)\le\varepsilon_{\rm down}$. Then
+\begin{equation}
+ \Pr_{P^{\rm ref}}(\mathsf A\cap F_{\rm down})
+ \le\varepsilon_{\rm down}\Pr(\mathsf A)+\alpha+\delta_{\rm ref}.
+ \label{eq:acceptedbound}
+\end{equation}
+The bound refers to the release-time reference continuation population and does not establish a per-scene collision guarantee or a guarantee under an unseen real driver class.
+\end{proposition}
+\begin{proof}
+Conditionally on $(\mathscr I,q_\alpha)$, the released action and event $\mathsf A$ are fixed; by the future-independence assumption, $\Pr(F_{\rm down}=1\mid\mathscr I,q_\alpha,a)=\mu_a^{\rm ref}(\mathscr I)$. Therefore $\Pr(\mathsf A\cap F_{\rm down})=\mathbb E[\mathbf1_{\mathsf A}\mu_a^{\rm ref}(\mathscr I)]$. On the simultaneous coverage event, the release gate bounds the mean by $\varepsilon_{\rm down}$. On its complement the mean is at most one. Separating these two events gives Eq.~\eqref{eq:acceptedbound}.
+\end{proof}
+If $\Pr(\mathsf A)>0$, the implied conditional-on-release statement is only $\Pr(F_{\rm down}\mid\mathsf A)\le\varepsilon_{\rm down}+(\alpha+\delta_{\rm ref})/\Pr(\mathsf A)$; rare releases can make it uninformative. In addition to the online interval certificate, a \emph{frozen} end-to-end planner may be audited on an independent i.i.d. evaluation set: with $M$ released episodes and $K$ realized reference failures, an exact one-sided binomial upper confidence limit (e.g., Clopper--Pearson) bounds the selected-release failure probability under that same population. This second audit cannot validate a policy tuned using its own results, and simulation-generated contact frequencies do not establish field-world risk. Neither coverage result is a certificate of zero collision.
+
+\section{TIV: Source Audits, Query Selection, and Execution}
+\label{app:queryimpl}
+\paragraph{Query construction.}
+For each provisional evidence failure, store the active gate LP or plausible-safe-regret witness. Use the dominant risk coordinate and CBC's time-respecting influence graph to retrieve its upstream policy event chain, from the earliest potentially altered brake/yield guard to the downstream minimum clearance or stopping slack. A candidate query specifies $\mathcal A_q$, $\mathcal P_q$, $\mathcal K_q$, a conservatively widened time window, a source identifier and sample/fidelity budget as in Eq.~\eqref{eq:query}. Source choice is tied to the suspected defect: more samples address Monte Carlo variance, new ego-conditioned rollout addresses residual/anchor error, structurally different reactants probe model bias, bounded reachability addresses physical-envelope ambiguity, and valid fresh sensor information addresses actual hidden response variables. A simulator is an offline or onboard computational model, not an independent observation of human counterfactual outcomes.
+
+\paragraph{Value-model supervision and restrictions.}
+Collect offline audits on held-out intervention scenes by executing the no-query decision and every feasible source query from the \emph{same} starting information state. Fit the acquisition head on a development set and evaluate its signed values on a disjoint audit set grouped by scene and response family. Let a reference reactor not used for the candidate response model supply the subsequent execution outcomes; measure realized source latency and the holding action. The signed target is
+\begin{equation}
+ y_q=L_{\rm exec}(\pi_0)-L_{\rm exec}(\pi_q)
+ -L_{\rm hold}(q,T_q)-\lambda_{\rm comp}c_q.
+ \label{eq:querytarget}
+\end{equation}
+A query-value head estimates $\mathbb E[y_q\mid\mathscr I,q]$ and may separately estimate certificate-resolution probability, expected union-risk correction and deadline survival. Its source condition includes an indicator for simulator independence, not an assumption that all sources are independent from reality. The measured loss is evaluated over the same horizon after accounting for time spent waiting; a purely computational query with no elapsed physical time has $L_{\rm hold}=0$. Queries are assessed at matched wall-clock budgets against entropy/disagreement selection, generic expected-planning-gain selection \parencite{chen2026not}, uniform source selection and full per-candidate response prediction. Unexpected source disagreement enlarges uncertainty rather than forcing consensus.
+
+\paragraph{Adaptive calibration and deadlines.}
+TIV computes queries with a frozen \emph{development} evidence set $\mathcal U_{\rm dev}$ and does not use the terminal calibration quantile to decide query count, stopping time or source. After the selected query, any genuine holding motion updates the physical state and candidate set. Terminal DSE then constructs the independently calibrated $\mathcal U(D)$ from this release information state; it may certify or veto a candidate but cannot send the algorithm back to TIV using the same certification split. An extension that uses certification outputs for repeated queries requires anytime-valid inference or a distinct independent calibration allocation at every adaptive stage. Queries require a worst-case latency allowance before a fixed decision deadline, a bounded compute budget and a checked holding prefix that preserves recourse against specified disturbances. An emergency brake command is never assumed intrinsically harmless to the following traffic chain.
+
+\begin{algorithm}[t]
+\caption{\method{}: cascade-boundary and decision-evidence planning}
+\label{alg:caver}
+\begin{algorithmic}[1]
+\Require Scene/history $s$, audited response sources, frozen provisional verifier, independent terminal calibration, budget $B$, deadline $T_{\max}$
+\Ensure Executable prefix and explicit evidence status
+\State Generate dynamically feasible matched actions $\mathcal A_{\rm dyn}$ and outcome-independent reference $a^0$.
+\State CBC: compute anchored joint responses, event guards, hybrid branches, contact/slack labels and provenance.
+\State Construct provisional risk set $\mathcal U_{\rm dev}$ for query localization (not release).
+\While{query budget remains and a checked holding prefix fits the deadline}
+  \State Evaluate provisional risk-gate and plausible-safe-regret witnesses.
+  \If{the provisional target is sufficiently resolved or no useful eligible query exists}
+    \State \textbf{break}
+  \EndIf
+  \State Form candidate--pair--chain--window--source queries from the leading witness.
+  \State Select $q$ with the highest audited positive $\widehat V(q)$ subject to latency/holding constraints.
+  \State Execute its verified waiting prefix if needed; obtain $Z_q$, update history and regenerate candidates.
+  \State Update provisional model evidence for the new release state.
+\EndWhile
+\State Construct the \emph{independent terminal} calibrated set $\mathcal U(D)$ for the frozen stopping state.
+\State Compute $\mathcal A_R(D)$, $\Gamma_R$ and $\Gamma_P$ for risk-admissible candidates.
+\If{some prefix-checked $a\in\mathcal A_R$ has $\Gamma_P(a)\le\varepsilon_{\rm reg}$}
+  \State \Return its prefix and \texttt{DECISION-CERTIFIED}.
+\ElsIf{some prefix-checked $a\in\mathcal A_R$ is allowed by the predeclared risk-only policy}
+  \State \Return its prefix and \texttt{RISK-ADMISSIBLE}; record unresolved choice regret.
+\Else
+  \State \Return an independently justified contingency prefix if available, else \texttt{UNCERTIFIED} to the operational safety controller.
+\EndIf
+\end{algorithmic}
+\end{algorithm}
+
+\paragraph{Complexity and identifiability.}
+For $A$ candidates, $M$ source families, $K$ sampled worlds, $N$ agents, $E$ time-causal graph edges, $L$ nonzero delay-kernel lags, $P$ screened non-ego pairs and $T$ fine time steps, naive candidate-conditioned simulation is $O(MKAT(N+E+P))$ before any solver overhead. A kernel graph update costs $O(TEL)$ and a joint graph-conditioned head adds $O(P)$ decoding after the shared summary. Anchor reuse reduces source-model evaluations, but guard branching may recover worst-case full-simulation cost. A polyhedral DSE with $d$ risk coordinates solves $O(AJ)$ risk-gate LPs plus at most $O(A^2)$ plausible-safe-regret LPs, where $J$ is the number of risk constraints per action. Query cost depends on the selected source, fidelity and allowed number of attempts. These asymptotic counts do not imply real-time feasibility; actual p95/p99 latency and memory, coverage versus abstention, and generalization to held-out driver policies must be measured. Most importantly, neither a structural simulator's paired intervention result nor a marginally calibrated reference-law risk interval proves individual-world causal responsibility or an unconditional real-world safety guarantee.
+
+\printbibliography
+\end{document}

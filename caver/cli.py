@@ -38,7 +38,7 @@ def parser():
     s=sub.add_parser('fourcar-mediation');s.add_argument('--out',required=True);s.add_argument('--seed',type=int,default=10);s.add_argument('--world-seed',type=int,default=10);s.add_argument('--family',default='late_brake')
     s=sub.add_parser('fourcar-scan');s.add_argument('--out',required=True);s.add_argument('--scenes',type=int,default=100);s.add_argument('--worlds',type=int,default=3);s.add_argument('--seed',type=int,default=100)
     s=sub.add_parser('collect');s.add_argument('--source',choices=['synthetic','synthetic-stress','womd-jsonl','nuplan-jsonl'],default='synthetic');s.add_argument('--input');s.add_argument('--split',choices=['train','calibration','test'],required=True);s.add_argument('--scenes',type=int,default=20);s.add_argument('--source-worlds',type=int,default=4);s.add_argument('--audit-worlds',type=int,default=16);s.add_argument('--checkpoint');s.add_argument('--source-family',choices=['delayed_idm','learned_logged','stress_source'],default='delayed_idm');s.add_argument('--policy-checkpoint');s.add_argument('--candidate-policy',choices=['fixed','observed-adaptive'],default='fixed');s.add_argument('--output',required=True)
-    s=sub.add_parser('train-cbc');s.add_argument('--input',required=True);s.add_argument('--variant',choices=['full','no_events','graph','anchor_full','anchor_graph','anchor_graph_event'],default='full');s.add_argument('--epochs',type=int,default=80);s.add_argument('--device',default='auto');s.add_argument('--contrast-weight',type=float,default=0.);s.add_argument('--seed',type=int,default=11);s.add_argument('--output',required=True)
+    s=sub.add_parser('train-cbc');s.add_argument('--input',required=True);s.add_argument('--variant',choices=['full','no_events','graph','anchor_full','anchor_graph','anchor_graph_event','anchor_graph_event_local','anchor_graph_delay_kernel'],default='full');s.add_argument('--epochs',type=int,default=80);s.add_argument('--device',default='auto');s.add_argument('--contrast-weight',type=float,default=0.);s.add_argument('--seed',type=int,default=11);s.add_argument('--output',required=True)
     s=sub.add_parser('cbc-study',help='Compact held-out CBC baseline/ablation comparison')
     s.add_argument('--input',required=True)
     s.add_argument('--model',action='append',default=[],help='label=checkpoint.pt; repeat')
@@ -68,7 +68,7 @@ def parser():
     s.add_argument('--output',required=True)
     s=sub.add_parser('evaluate');s.add_argument('--input',required=True);s.add_argument('--checkpoint');s.add_argument('--calibration');s.add_argument('--eps-ego',type=float,default=.08);s.add_argument('--eps-down',type=float,default=.12);s.add_argument('--eps-inc',type=float,default=.1);s.add_argument('--eps-reg',type=float,default=1.5);s.add_argument('--surrogate-prefix-check',action='store_true',help='Simulation-only prefix check assumption; NOT a physical field certificate');s.add_argument('--output',required=True)
     s=sub.add_parser('audit-splits');s.add_argument('--train',required=True);s.add_argument('--calibration',required=True);s.add_argument('--test',required=True);s.add_argument('--output',required=True)
-    s=sub.add_parser('tiv-audit');s.add_argument('--input',required=True);s.add_argument('--output',required=True);s.add_argument('--head',required=True);s.add_argument('--epochs',type=int,default=120);s.add_argument('--budget',type=float,default=12.)
+    s=sub.add_parser('tiv-audit');s.add_argument('--input',required=True);s.add_argument('--validation');s.add_argument('--output',required=True);s.add_argument('--head',required=True);s.add_argument('--epochs',type=int,default=120);s.add_argument('--budget',type=float,default=12.)
     s=sub.add_parser('carla-check');s.add_argument('--host');s.add_argument('--port',type=int);s.add_argument('--timeout',type=float,default=8.);s.add_argument('--output')
     s=sub.add_parser('carla-run');s.add_argument('--host');s.add_argument('--port',type=int);s.add_argument('--town',default='Town04');s.add_argument('--out',required=True);s.add_argument('--step',type=float,default=.05);s.add_argument('--horizon',type=float,default=8.)
     return p
@@ -343,33 +343,52 @@ def run(args):
         rec=list(read_records(args.input));training=[];audit=[]
         if not rec or any(r.get('experimental_split')!='train' for r in rec):
             raise ValueError('TIV acquisition-head training requires --split train; never test/calibration reference labels')
-        for row in rec:
-            acts=[Action(**a) for a in row['actions']];names=[a.action_id for a in acts]
-            d=choose(row['predicted'],names,row['pairs'],calibration=None)
-            queries=propose(d,row['predicted'],names,row['pairs'],budget=args.budget,deadline_ms=110)
-            scene=Scene.from_json(row['scene'])
-            # Loss is an explicitly stated *proxy* selector loss on held-out
-            # structural reactors; not a valid certified post-query DSE update.
-            base=min(names,key=lambda a:row['predicted'][a+'/down']+(.5 if a=='reference' else 0.))
-            oracle=lambda a:row['audited'][a+'/down']+(.5 if a=='reference' else 0.)
-            for q in queries:
-                out=verify_source(scene,acts,q,seed=98174)
-                if out['status']!='SIMULATED_QUERY':continue
-                pv=dict(row['predicted'])
-                for a in q.candidates:
-                    xs=[r['downstream'] for r in out['outcomes'] if r['action']==a]
-                    if xs:pv[a+'/down']=float(np.mean(xs))
-                selected=min(names,key=lambda a:pv[a+'/down']+(.5 if a=='reference' else 0.))
-                gain=oracle(base)-oracle(selected)-.001*q.cost-.0002*q.presumed_latency_ms
-                item={'scene_id':row['scene_id'],'source':q.source,'before':base,'after':selected,
-                      'signed_value':float(gain),'features':query_features(d,row['predicted'],q).tolist(),
-                      'evaluated_reference':row['audit_families'],'query_is_certificate':False}
-                training.append(item);audit.append(item)
+        validation=list(read_records(args.validation)) if args.validation else rec
+        if not validation or any(r.get('experimental_split') not in ('train','calibration','test') for r in validation):
+            raise ValueError('TIV validation records must use train, calibration or test split')
+        if args.validation and any(r.get('experimental_split')=='train' for r in validation):
+            raise ValueError('TIV validation records must be disjoint from train records')
+        if args.validation:
+            train_ids={r.get('scene_id') for r in rec}
+            val_ids={r.get('scene_id') for r in validation}
+            if train_ids & val_ids:
+                raise ValueError('TIV train/validation scene overlap')
+            def group(row):
+                return row.get('scene',{}).get('provenance',{}).get('overlap_group',row.get('scene_id'))
+            if {group(r) for r in rec} & {group(r) for r in validation}:
+                raise ValueError('TIV train/validation overlap-group overlap')
+
+        def build_labels(rows):
+            result=[]
+            for row in rows:
+                acts=[Action(**a) for a in row['actions']];names=[a.action_id for a in acts]
+                d=choose(row['predicted'],names,row['pairs'],calibration=None)
+                queries=propose(d,row['predicted'],names,row['pairs'],budget=args.budget,deadline_ms=110)
+                scene=Scene.from_json(row['scene'])
+                base=min(names,key=lambda a:row['predicted'][a+'/down']+(.5 if a=='reference' else 0.))
+                oracle=lambda a:row['audited'][a+'/down']+(.5 if a=='reference' else 0.)
+                for q in queries:
+                    out=verify_source(scene,acts,q,seed=98174)
+                    if out['status']!='SIMULATED_QUERY':continue
+                    pv=dict(row['predicted'])
+                    for a in q.candidates:
+                        xs=[r['downstream'] for r in out['outcomes'] if r['action']==a]
+                        if xs:pv[a+'/down']=float(np.mean(xs))
+                    selected=min(names,key=lambda a:pv[a+'/down']+(.5 if a=='reference' else 0.))
+                    gain=oracle(base)-oracle(selected)-.001*q.cost-.0002*q.presumed_latency_ms
+                    result.append({'scene_id':row['scene_id'],'source':q.source,'before':base,'after':selected,
+                                   'signed_value':float(gain),'features':query_features(d,row['predicted'],q).tolist(),
+                                   'evaluated_reference':row['audit_families'],'query_is_certificate':False})
+            return result
+
+        training=build_labels(rec)
+        audit=build_labels(validation)
         Path(args.output).parent.mkdir(parents=True,exist_ok=True)
         Path(args.output).write_text('\n'.join(json.dumps(a) for a in audit)+'\n')
         if len(training)>=6:status=learn_query_value(training,args.head,args.epochs)
-        else:status={'trained':False,'reason':'Insufficient audited query labels'}
-        report({'records':len(training),'audit':args.output,'head':status,
+        else:status={'trained':False,'reason':'Insufficient audited query labels','n':len(training)}
+        report({'training_records':len(training),'validation_records':len(audit),'audit':args.output,'head':status,
+                'same_file_train_validation':not bool(args.validation),
                 'warning':'Signed synthetic proxy acquisition targets only; no terminal release calibration or independent physical reference'})
     elif args.cmd=='carla-check':
         from caver.integrations.carla_runner import preflight

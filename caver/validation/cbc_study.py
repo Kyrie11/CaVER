@@ -151,7 +151,14 @@ def _score_prediction(row, predicted, threshold, detection):
             'pair_errors':errors,'down_errors':down_errors,'regret':regret,
             'pair_regrets':pair_regrets,'decision_abstain':decision_abstain,
             'event':pairs,'pair_errors_near':near,'pair_errors_far':far,
-            'risk_reversal':risk_reversal,'ego_safe':ego_safe}
+            'risk_reversal':risk_reversal,'ego_safe':ego_safe,
+            # Preserve the declared reference budget in the scored row.  The
+            # aggregate is built from scored rows rather than raw records, so
+            # dropping these fields silently produced n_worlds=0 metadata in
+            # v5 reports.
+            'audit_families':list(row.get('audit_families', [])),
+            'audit_worlds_per_family':int(row.get('audit_worlds_per_family', 0)),
+            'n_pairs':int(len(row.get('pairs', [])))}
 
 
 def _aggregate(rows):
@@ -175,7 +182,7 @@ def _aggregate(rows):
         'reference_familywise_within_scene_resolved_critical_n':len(familywise),
         'finite_mc_radius':finite_mc_radius_metadata(
             int(rows[0].get('audit_worlds_per_family',0))*len(rows[0].get('audit_families',[])) if rows else 0,
-            max(1, len(rows[0].get('pairs',[]))) if rows else 1, .05),
+            max(1, int(rows[0].get('n_pairs', 1))) if rows else 1, .05),
         'reference_mc_ci_familywise_scope':'within-scene pairwise only; not global-FWER across scenes',
         'matched_ego_safe_scenes':sum(int(r.get('matched_ego_safe',False)) for r in rows),
         'matched_legal_ego_safe_scenes':sum(int(r.get('matched_legal_ego_safe',False)) for r in rows),
