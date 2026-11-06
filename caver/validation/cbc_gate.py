@@ -87,6 +87,21 @@ def _strict_point_gain(method, control):
     return all(values)
 
 
+def _noninferior_point_gain(method, control):
+    """Descriptive check allowing ties on saturated zero-error metrics."""
+    values=[]
+    strict=False
+    for metric in _COMPONENT_METRICS:
+        m=_number(method.get(metric)); c=_number(control.get(metric))
+        if m is None or c is None:
+            return False
+        if m>c:
+            return False
+        strict = strict or (m<c)
+        values.append(m<=c)
+    return bool(values) and strict and all(values)
+
+
 def _equal_budget_audit(report, method_name, control_name, parameter_tolerance=.01, contrast_weight_mode='equal'):
     """Verify same training data/seed/updates and near-equal active parameters."""
     checkpoints=report.get('checkpoints',{})
@@ -223,8 +238,17 @@ def summarize(study_path, boundary_path=None, min_resolved=30,
         report.get('paired_scene_bootstrap_anchor_graph_minus_anchor_full',{}))
     event_vs_no_event=_joint_ci_support(
         report.get('paired_scene_bootstrap_full_minus_no_events',{}))
+    event_local_vs_graph=_joint_ci_support(
+        report.get('paired_scene_bootstrap_anchor_graph_event_local_minus_anchor_graph',{}))
+    delay_kernel_vs_graph=_joint_ci_support(
+        report.get('paired_scene_bootstrap_anchor_graph_delay_kernel_minus_anchor_graph',{}))
 
     graph_point_advantage=_strict_point_gain(graph,anchor_no_graph)
+    graph_point_noninferior=_noninferior_point_gain(graph,anchor_no_graph)
+    delay_kernel_point_noninferior=_noninferior_point_gain(
+        methods.get('anchor_graph_delay_kernel',{}), graph)
+    event_local_point_noninferior=_noninferior_point_gain(
+        methods.get('anchor_graph_event_local',{}), graph)
     event_point_advantage=_strict_point_gain(methods.get('full',{}),
                                               methods.get('no_events',{}))
     graph_budget=_equal_budget_audit(report,'anchor_graph','anchor_full')
@@ -274,7 +298,8 @@ def summarize(study_path, boundary_path=None, min_resolved=30,
         source_union=_number(baseline.get('downstream_union_reference_risk_mae'))
         if graph_sign is None or reuse_sign is None or graph_union is None or source_union is None:
             verdict='MISSING_PRIMARY_COMPARATORS'
-        elif graph_sign<reuse_sign and graph_union<=source_union:
+        elif (graph_sign<=reuse_sign and graph_union<=source_union
+              and (graph_sign<reuse_sign or graph_union<source_union)):
             # This is only a descriptive simulator-conditional contrast.
             verdict='DESCRIPTIVE_SIMULATOR_CONDITIONAL_SIGNAL_ONLY'
         else:
@@ -345,11 +370,16 @@ def summarize(study_path, boundary_path=None, min_resolved=30,
                 'anchor_graph_minus_anchor_copy':graph_vs_copy,
                 'anchor_graph_minus_equal_anchor_budget_without_graph':graph_vs_no_graph,
                 'full_minus_equal_full_source_budget_no_events':event_vs_no_event,
+                'anchor_graph_event_local_minus_anchor_graph':event_local_vs_graph,
+                'anchor_graph_delay_kernel_minus_anchor_graph':delay_kernel_vs_graph,
                 'graph_equal_budget_audit':graph_budget,
                 'event_equal_budget_audit':event_budget,
                 'graph_component_gain_supported':graph_component_supported,
                 'event_component_gain_supported':event_component_supported,
                 'graph_strictly_better_than_anchor_full_point_estimate':graph_point_advantage,
+                'graph_noninferior_with_strict_metric_gain_point_estimate':graph_point_noninferior,
+                'delay_kernel_noninferior_with_strict_metric_gain_point_estimate':delay_kernel_point_noninferior,
+                'event_local_noninferior_with_strict_metric_gain_point_estimate':event_local_point_noninferior,
                 'full_strictly_better_than_no_events_point_estimate':event_point_advantage},
             'contrastive_ablation':{
                 'full_contrast_minus_full':full_contrast_ci,

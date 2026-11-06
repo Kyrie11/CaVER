@@ -76,7 +76,9 @@ class VerificationValueHead(nn.Module):
     def forward(self,x):return self.net(x).squeeze(-1)
 
 def query_features(decision,pred,q):
-    pp=[pred.get(f'{a}/{p}',0.) for a in q.candidates for p in q.pairs]
+    # Missing coordinates are unresolved evidence. Treat them as the
+    # conservative upper end used by the DSE LP instead of as zero risk.
+    pp=[pred.get(f'{a}/{p}',1.) for a in q.candidates for p in q.pairs]
     mar=[decision.margins.get(a,{}).get('downstream_upper',1.) for a in q.candidates]
     regrets=[decision.worst_regret.get(a,5.) for a in q.candidates]
     src=['more_source_samples','full_candidate_reprediction','independent_late_brake','independent_conservative',

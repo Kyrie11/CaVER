@@ -302,14 +302,24 @@ def run(args):
         from caver.models.cbc import load
         from caver.validation.extended_metrics import extended_audit
         rec=list(read_records(args.input))
+        checkpoint_digest=None; model_variant=None
         if args.checkpoint:
             model=load(args.checkpoint)
+            checkpoint_digest=hashlib.sha256(Path(args.checkpoint).read_bytes()).hexdigest()
+            model_variant=getattr(model,'variant',None)
             rec=[record_with_new_predictions(r,model) for r in rec]
         result=extended_audit(
             rec, contrast_threshold=args.contrast, detection_threshold=args.detect,
             bootstrap=args.bootstrap, seed=args.seed,
             reuse_clearance_multiplier=args.reuse_clearance_multiplier,
             reuse_guard_multiplier=args.reuse_guard_multiplier)
+        result['provenance']={
+            'input_sha256':hashlib.sha256(Path(args.input).read_bytes()).hexdigest(),
+            'checkpoint_sha256':checkpoint_digest,
+            'model_variant':model_variant,
+            'records':len(rec),
+            'evaluator_schema':result.get('schema'),
+            'runtime_scope':result.get('runtime',{}).get('scope')}
         report(result,args.output)
     elif args.cmd=='evaluate':
         from caver.experiment import read_records,record_with_new_predictions,evaluate

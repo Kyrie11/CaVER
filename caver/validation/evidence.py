@@ -14,6 +14,14 @@ import numpy as np
 from scipy.optimize import linprog
 
 
+def risk_kind(key: str) -> str:
+    """Group coordinates for simultaneous, constraint-aware calibration."""
+    suffix=str(key).rsplit('/',1)[-1]
+    if suffix=='ego': return 'ego'
+    if suffix=='down': return 'downstream'
+    return 'pair'
+
+
 @dataclass
 class Calibration:
     quantile: float
@@ -30,11 +38,16 @@ class Calibration:
     # release state unless that *same frozen query/hold procedure* was calibrated.
     procedure: str = 'NO_QUERY_NO_HOLD'
     label_scope: str = 'SIMULATED_REFERENCE_CONDITIONAL_MEANS'
+    quantiles_by_kind: dict[str,float] = field(default_factory=dict)
+    mc_buffers_by_kind: dict[str,float] = field(default_factory=dict)
 
-    def interval(self, p, scale=1.0):
+    def interval(self, p, scale=1.0, key=None):
         if not self.valid or not np.isfinite(p) or not (0 <= p <= 1):
             raise ValueError('Invalid reference calibration or risk prediction')
-        radius = self.quantile * scale + self.mc_buffer
+        kind=risk_kind(key) if key is not None else None
+        q=self.quantiles_by_kind.get(kind,self.quantile)
+        b=self.mc_buffers_by_kind.get(kind,self.mc_buffer)
+        radius = q * scale + b
         return max(0., float(p) - radius), min(1., float(p) + radius)
 
     @classmethod
@@ -65,30 +78,35 @@ def conformal_calibrate(samples, alpha=.1, audit_worlds=32, mc_delta=.05,
     if any(not x or x != set(row['audited']) for x, row in zip(keys, samples)):
         raise ValueError('Risk-coordinate mismatch between reference and prediction')
     n = len(samples)
-    N = sum(len(x) for x in keys)
-    radius = math.sqrt(math.log(2 * N / mc_delta) / (2 * audit_worlds))
-    scores = []
+    kinds=sorted({risk_kind(k) for x in keys for k in x})
+    alpha_kind=alpha/max(1,len(kinds)); delta_kind=mc_delta/max(1,len(kinds))
+    scores_by_kind={kind:[] for kind in kinds}
     for row in samples:
-        r = 0.
+        row_scores={kind:0. for kind in kinds}
         for key, p in row['predicted'].items():
             mu_hat = float(row['audited'][key])
             if not np.isfinite(p) or not np.isfinite(mu_hat) or not (0 <= p <= 1 and 0 <= mu_hat <= 1):
                 raise ValueError('Risk means must be finite in [0,1]')
-            r = max(r, abs(float(p) - mu_hat))
-        scores.append(r)
-    k = math.ceil((n + 1) * (1 - alpha))
-    # If k=n+1, every valid Bernoulli risk lies inside the full [0,1]
-    # range. q=1 gives the same set without non-JSON Infinity.
-    q = 1. if k > n else float(np.sort(scores)[k - 1])
+            kind=risk_kind(key)
+            row_scores[kind]=max(row_scores[kind],abs(float(p)-mu_hat))
+        for kind in kinds:scores_by_kind[kind].append(row_scores[kind])
+    q_by={};b_by={}
+    for kind in kinds:
+        kk=math.ceil((n+1)*(1-alpha_kind))
+        q_by[kind]=1. if kk>n else float(np.sort(scores_by_kind[kind])[kk-1])
+        count=sum(1 for x in keys if any(risk_kind(k)==kind for k in x))
+        b_by[kind]=math.sqrt(math.log(2*max(1,count)/delta_kind)/(2*audit_worlds))
+    q=max(q_by.values(),default=1.);radius=max(b_by.values(),default=0.)
     return Calibration(q, alpha, n, audit_worlds, mc_delta, radius,
                        list(reference_families or []), predictor_digest,
-                       'EPISODE_DISJOINT_CALIBRATION', procedure=procedure)
+                       'EPISODE_DISJOINT_CALIBRATION', procedure=procedure,
+                       quantiles_by_kind=q_by, mc_buffers_by_kind=b_by)
 
 
 def risk_intervals(pred, calibration=None):
     if calibration is None:
         return {k: (0., 1.) for k in pred}
-    return {k: calibration.interval(p) for k, p in pred.items()}
+    return {k: calibration.interval(p,key=k) for k, p in pred.items()}
 
 
 @dataclass
@@ -127,7 +145,7 @@ class CoherentRiskSet:
         self.keys = [f'{a}/{k}' for a in names for k in ['ego', 'down', *pairs]]
         self.keys += [f'{a}/slack' for a in names if f'{a}/slack' in predictions]
         self.index = {x: i for i, x in enumerate(self.keys)}
-        self.bounds = [calibration.interval(float(predictions[key])) if key in predictions
+        self.bounds = [calibration.interval(float(predictions[key]),key=key) if key in predictions
                        else (0., 1.) for key in self.keys]
         self.A = []
         self.B = []

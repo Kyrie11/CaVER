@@ -62,7 +62,7 @@ class CascadeRiskHead(nn.Module):
         self.output=nn.Linear(width,3) # contact logit correction, margin residual, stopping-slack residual
 
     def forward(self,x):
-        if self.variant in ('graph','anchor_graph','anchor_graph_event'):
+        if self.variant in ('graph','anchor_graph','anchor_graph_event','anchor_graph_event_local','anchor_graph_delay_kernel'):
             raise RuntimeError('Graph CBC variants require graph_model(features, temporal_trace, pair_ids); dense forward is not defined')
         feature=x.clone()
         if self.variant=='no_events':

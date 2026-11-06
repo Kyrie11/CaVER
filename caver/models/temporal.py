@@ -34,12 +34,19 @@ def source_temporal_graph(scene, rollouts, dt_sample=.4):
         traj=np.asarray(r['trajectory'],float)
         if traj.ndim!=3 or traj.shape[1:]!=(len(ids),6):
             raise ValueError('Invalid source rollout trajectory')
-        if len(r['accelerations'][scene.ego_id])!=len(traj)-1:
+        if not np.all(np.isfinite(traj)):
+            raise ValueError('Nonfinite source rollout trajectory')
+        accelerations=r.get('accelerations',{})
+        if any(key not in accelerations for key in ids):
+            raise ValueError('Source temporal acceleration actor mismatch')
+        if any(len(accelerations[key])!=len(traj)-1 for key in ids):
             raise ValueError('Source temporal acceleration length mismatch')
         take=np.arange(0,len(traj),max(1,round(dt_sample/scene.dt)))
         accel=np.zeros((len(traj),len(ids)),float)
         for i,key in enumerate(ids):
-            a=np.asarray(r['accelerations'][key],float)
+            a=np.asarray(accelerations[key],float)
+            if not np.all(np.isfinite(a)):
+                raise ValueError('Nonfinite source temporal acceleration')
             accel[:-1,i]=a
             accel[-1,i]=a[-1] if len(a) else 0.
         local=np.stack(((traj[take,:,0]-ego.x)/100.,
@@ -66,6 +73,9 @@ def source_temporal_graph(scene, rollouts, dt_sample=.4):
                 receiver_delays=np.asarray([
                     r.get('driver_delay_s',{}).get(recv.agent_id,delay_mean[recv.agent_id])
                     for r in rollouts],dtype=float)
+                if (not np.all(np.isfinite(receiver_delays)) or
+                        np.any(receiver_delays < 0.)):
+                    raise ValueError('Source driver delays must be finite and nonnegative')
                 receiver_delay=float(np.mean(receiver_delays))
                 lag=max(1,int(math.ceil(receiver_delay/dt_sample)))
                 edges.append([i,j,lag])

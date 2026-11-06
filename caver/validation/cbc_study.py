@@ -300,6 +300,10 @@ def study(test_file,models,contrast=.20,detect=.05,bootstrap=2000,max_examples=8
                    if 'full' in details and 'no_events' in details else {})
     paired_graph=(_bootstrap(details['anchor_graph'],details['anchor_full'],n_boot=bootstrap)
                    if 'anchor_graph' in details and 'anchor_full' in details else {})
+    paired_event_local=(_bootstrap(details['anchor_graph_event_local'],details['anchor_graph'],n_boot=bootstrap)
+                        if 'anchor_graph_event_local' in details and 'anchor_graph' in details else {})
+    paired_delay_kernel=(_bootstrap(details['anchor_graph_delay_kernel'],details['anchor_graph'],n_boot=bootstrap)
+                         if 'anchor_graph_delay_kernel' in details and 'anchor_graph' in details else {})
     paired_full_contrast=(_bootstrap(details['full_contrast'],details['full'],n_boot=bootstrap)
                           if 'full_contrast' in details and 'full' in details else {})
     paired_graph_contrast=(_bootstrap(details['anchor_graph_contrast'],details['anchor_graph'],n_boot=bootstrap)
@@ -328,6 +332,8 @@ def study(test_file,models,contrast=.20,detect=.05,bootstrap=2000,max_examples=8
             'paired_scene_bootstrap_method_minus_anchor_copy':paired_vs_anchor,
             'paired_scene_bootstrap_full_minus_no_events':paired_events,
             'paired_scene_bootstrap_anchor_graph_minus_anchor_full':paired_graph,
+            'paired_scene_bootstrap_anchor_graph_event_local_minus_anchor_graph':paired_event_local,
+            'paired_scene_bootstrap_anchor_graph_delay_kernel_minus_anchor_graph':paired_delay_kernel,
             'paired_scene_bootstrap_full_contrast_minus_full':paired_full_contrast,
             'paired_scene_bootstrap_anchor_graph_contrast_minus_anchor_graph':paired_graph_contrast,
             'source_worlds_per_candidate':records[0].get('source_worlds'),

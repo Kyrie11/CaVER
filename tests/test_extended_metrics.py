@@ -10,7 +10,8 @@ def test_extended_audit_keeps_unresolved_and_sign_error_separate():
     cp = out['critical_pairs']
     assert 'critical_pair_sign_error_rate' in cp
     assert 'critical_pair_underresolution_rate' in cp
-    assert out['event_timing']['status'] == 'NOT_MEASURED'
+    assert out['event_timing']['status'] == 'MEASURED_OFFLINE_RESPONSE_DIAGNOSTIC'
+    assert out['event_timing']['event_head_recall_measured'] is False
     assert out['false_safe_anchor_reuse']['status'] == 'NOT_MEASURED'
     assert out['runtime']['status'] == 'MEASURED'
     assert out['runtime']['scope'].startswith('OFFLINE_')

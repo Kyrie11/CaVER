@@ -185,6 +185,10 @@ def _pair_records(
 ) -> list[dict[str, Any]]:
     if only_matched and not _matched(row, pair_key=f"{early}|{late}"):
         return []
+    # Keep the primary ranking denominator aligned with cbc-study. A pair is
+    # eligible only when both matched candidate actions are reference-ego-safe.
+    if _ego_safe(row, (early, late), threshold=.05) is not True:
+        return []
     pred = row.get("predicted", {})
     aud = row.get("audited", {})
     radius = _reference_radius(row, alpha=alpha)

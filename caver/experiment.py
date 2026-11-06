@@ -3,6 +3,7 @@ from pathlib import Path
 from dataclasses import asdict
 from hashlib import sha256
 import json,math,time,gzip
+from collections import Counter
 import numpy as np
 import torch
 from caver.sim.traffic import standard_fourcar,candidates,Action,sample_world,rollout
@@ -397,7 +398,11 @@ def fit_cbc(records,output,epochs=75,seed=11,variant='full',device='auto',contra
         raise ValueError('Need >=6 pairs and >=2 joint candidate labels')
 
     m=CascadeRiskHead(variant=variant)
-    m.joint=JointRiskHead(suppress_events=(variant=='no_events'), graph_dim=(32 if uses_graph else 0))
+    # Keep the no-graph anchor control at the same joint-head capacity as
+    # graph variants. The context is zero-filled for anchor_full, so this is
+    # a capacity control rather than graph evidence.
+    joint_graph_dim=32 if (uses_graph or variant=='anchor_full') else 0
+    m.joint=JointRiskHead(suppress_events=(variant=='no_events'), graph_dim=joint_graph_dim)
     if uses_graph:
         from caver.models.temporal import GraphCascadeRiskHead
         m.graph_model=GraphCascadeRiskHead(
@@ -564,15 +569,19 @@ def evaluate(records,calibration=None,eps_down=.7,eps_ego=.7,eps_inc=.8,eps_reg=
             regret=max(0.,ref[f'{selected}/down']-min([ref[f'{a}/down'] for a in truth_safe] or [1.]))
         else:regret=None
         outputs.append({'scene_id':row['scene_id'],'status':d.status,'selected':selected,
-                        'admitted':d.candidates,'gamma_R':d.gamma_robust,'gamma_P':d.gamma_plausible,
+                        'admitted':d.candidates,'margins':d.margins,'gamma_R':d.gamma_robust,'gamma_P':d.gamma_plausible,
                         'worst_witnesses':d.witnesses,'regret_on_audited_reactor':regret,
                         'reference_downstream_risk':ref.get(f'{selected}/down') if selected is not None else None,
                         'accepted_wrong':bool(selected is not None and selected not in truth_safe),
-                        'evidence_coverage':all((calibration.interval(row['predicted'][k])[0]<=ref[k]<=calibration.interval(row['predicted'][k])[1]) for k in ref) if calibration else None,
+                        'evidence_coverage':all((calibration.interval(row['predicted'][k],key=k)[0]<=ref[k]<=calibration.interval(row['predicted'][k],key=k)[1]) for k in ref) if calibration else None,
                         'reason':d.reason,'warnings':['simulator conditional','strict_prefix='+str(strict_prefix)]})
     n=len(outputs);accepted=[x for x in outputs if x['selected']]
     risk_admitted=[x for x in outputs if x['admitted']]
     decision_certified=[x for x in outputs if x['status']=='DECISION-CERTIFIED']
+    failed_constraints=Counter()
+    for row in outputs:
+        for margin in row.get('margins',{}).values():
+            for name in margin.get('failed_constraints',[]): failed_constraints[name]+=1
     return {'scenes':n,'accepted':len(accepted),'abstain':n-len(accepted),
             'risk_admissible_scene_coverage':len(risk_admitted)/n if n else None,
             'decision_certified_scene_coverage':len(decision_certified)/n if n else None,
@@ -580,6 +589,7 @@ def evaluate(records,calibration=None,eps_down=.7,eps_ego=.7,eps_inc=.8,eps_reg=
             'audit_wrong_choice_rate_accepted':float(np.mean([r['accepted_wrong'] for r in accepted])) if accepted else None,
             'audit_decision_regret_accepted':float(np.mean([r['regret_on_audited_reactor'] for r in accepted])) if accepted else None,
             'joint_interval_coverage':float(np.mean([r['evidence_coverage'] for r in outputs])) if calibration else None,
+            'failed_constraint_counts':dict(failed_constraints),
             'rows':outputs,'independent_field_validation':False}
 
 def synthetic_records(count=10,start=100,source_worlds=2,audit_worlds=4,model=None):

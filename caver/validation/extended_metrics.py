@@ -383,13 +383,27 @@ def false_safe_reuse_summary(rows: Iterable[dict[str, Any]], clearance_multiplie
 
 
 def event_timing_summary(rows: Iterable[dict[str, Any]]):
-    """Compute event recall/lead only when explicit labels and triggers exist."""
+    """Compute event timing with an explicit online/offline scope."""
     rows = list(rows)
     labels = []
+    scope = 'ONLINE_TRIGGER_DIAGNOSTIC'
     for row in rows:
-        # Future implementations may store event_labels and predicted_events
-        # per candidate/pair.  Current v3 records intentionally do not.
-        labels.extend(row.get('event_timing_labels', row.get('events', [])))
+        explicit=row.get('event_timing_labels', row.get('events', []))
+        if explicit:
+            labels.extend(explicit)
+            continue
+        # Current collectors expose source/reference response onset only.
+        # This is useful for reactor diagnostics but is not an online CBC
+        # trigger and must not be reported as event-head recall.
+        for x in row.get('offline_response_onset_diagnostics', []):
+            labels.append({
+                'event_type':x.get('event_type','brake_onset'),
+                'reference_present':x.get('reference_response_present',False),
+                'predicted_present':x.get('source_response_present',False),
+                'reference_onset_s':x.get('reference_onset_s'),
+                'predicted_trigger_s':x.get('source_response_onset_s'),
+                'diagnostic_scope':'OFFLINE_SOURCE_REFERENCE_RESPONSE_ONSET'})
+            scope='OFFLINE_SOURCE_REFERENCE_RESPONSE_ONSET'
     if not labels:
         return {'status': 'NOT_MEASURED',
                 'reason': 'records contain guard-flip summaries but no frozen event labels and predicted trigger times',
@@ -408,7 +422,9 @@ def event_timing_summary(rows: Iterable[dict[str, Any]]):
             and x.get('reference_onset_s', x.get('ref_onset_s')) is not None]
     lead = [float(x.get('reference_onset_s', x.get('ref_onset_s'))) -
             float(x.get('predicted_trigger_s', x.get('predicted_onset_s'))) for x in hits]
-    return {'status': 'MEASURED', 'event_count': len(labels), 'observed_count': len(observed),
+    return {'status': 'MEASURED' if scope=='ONLINE_TRIGGER_DIAGNOSTIC' else 'MEASURED_OFFLINE_RESPONSE_DIAGNOSTIC',
+            'scope':scope, 'event_head_recall_measured':scope=='ONLINE_TRIGGER_DIAGNOSTIC',
+            'event_count': len(labels), 'observed_count': len(observed),
             'tp': tp, 'fp': fp, 'fn': fn, 'tn': tn,
             'detected_count': len(hits), 'recall': tp / (tp + fn) if tp + fn else None,
             'precision': tp / (tp + fp) if tp + fp else None,
@@ -492,8 +508,11 @@ def extended_audit(rows: Iterable[dict[str, Any]], prediction_key: str = 'predic
         'schema': 'CBC_EXTENDED_AUDIT_V1',
         'records': len(rows),
         'yield': yield_summary(rows),
-        'critical_pairs': critical_pair_metrics(rows, prediction_key, contrast_threshold,
-                                                detection_threshold, bootstrap, seed),
+        'critical_pairs': critical_pair_metrics(
+            rows, prediction_key=prediction_key,
+            contrast_threshold=contrast_threshold,
+            detection_threshold=detection_threshold,
+            bootstrap=bootstrap, seed=seed),
         'false_safe_anchor_reuse': false_safe_reuse_summary(
             rows, reuse_clearance_multiplier, reuse_guard_multiplier, bootstrap=bootstrap, seed=seed),
         'event_timing': event_timing_summary(rows),
