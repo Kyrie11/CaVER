@@ -163,12 +163,14 @@ def paired_boundary_diagnostics(source_by_action,ref_by_action,pairs,actions,dt=
     return result
 
 
-def _event_timing_labels(source_by_action, ref_by_action, actions, scene):
-    """Export censor-aware onset labels for offline event diagnostics.
+def _offline_response_onset_diagnostics(source_by_action, ref_by_action, actions, scene):
+    """Summarize offline source/reference response onsets.
 
-    These labels are generated only after the held-out reference rollouts and
-    are never consumed by CBC features.  A missing onset is right-censored at
-    the horizon rather than encoded as a numeric sentinel.
+    These are simulator trajectory diagnostics, not CBC event-detector outputs:
+    ``source_response_onset_s`` is the onset observed in the source reactor and
+    must never be interpreted as an online predicted trigger timestamp.  The
+    held-out reference onset is retained for descriptive comparison only.
+    Missing onsets are right-censored at the rollout horizon.
     """
     labels=[]
     non_ego=[a.agent_id for a in scene.agents if a.agent_id!=scene.ego_id]
@@ -184,17 +186,17 @@ def _event_timing_labels(source_by_action, ref_by_action, actions, scene):
                 'event_type':'brake_onset',
                 'action_id':aid,
                 'actor_id':actor,
-                'reference_present':bool(ref_on),
-                'predicted_present':bool(src_on),
+                'reference_response_present':bool(ref_on),
+                'source_response_present':bool(src_on),
                 'reference_onset_s':float(np.median(ref_on)) if ref_on else None,
-                'predicted_trigger_s':float(np.median(src_on)) if src_on else None,
+                'source_response_onset_s':float(np.median(src_on)) if src_on else None,
                 'reference_onset_q10_s':float(np.quantile(ref_on,.1)) if ref_on else None,
                 'reference_onset_q90_s':float(np.quantile(ref_on,.9)) if ref_on else None,
-                'predicted_onset_q10_s':float(np.quantile(src_on,.1)) if src_on else None,
-                'predicted_onset_q90_s':float(np.quantile(src_on,.9)) if src_on else None,
+                'source_response_onset_q10_s':float(np.quantile(src_on,.1)) if src_on else None,
+                'source_response_onset_q90_s':float(np.quantile(src_on,.9)) if src_on else None,
                 'reference_censored':not bool(ref_on),
-                'predicted_censored':not bool(src_on),
-                'label_scope':'SIMULATOR_CONDITIONAL_OFFLINE_EVENT_DIAGNOSTIC'})
+                'source_response_censored':not bool(src_on),
+                'diagnostic_scope':'OFFLINE_SOURCE_VS_REFERENCE_RESPONSE_ONSET_NOT_CBC_TRIGGER'})
     return labels
 
 def paired_scene(scene,actions=None,source_family='delayed_idm',audit_families=('late_brake','conservative'),
@@ -247,7 +249,8 @@ def paired_scene(scene,actions=None,source_family='delayed_idm',audit_families=(
             'actions':[asdict(a) for a in actions],'pairs':pairs,'predicted':prediction,'audited':reference,
             'diagnostics':diagnostics,'temporal':temporal,'candidate_matching':matching,
             'boundary_diagnostics':boundary,
-            'event_timing_labels':_event_timing_labels(source_by_action,ref_by_action,actions,scene),
+            'offline_response_onset_diagnostics':_offline_response_onset_diagnostics(
+                source_by_action,ref_by_action,actions,scene),
             'reference_label':'SIMULATOR_CONDITIONAL_ONLY'}
     if 'early' in record['temporal']:
         from caver.models.anchor import build_anchor_view

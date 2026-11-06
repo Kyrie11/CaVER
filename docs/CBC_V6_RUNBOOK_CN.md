@@ -106,7 +106,7 @@ for name in source full no_events anchor_full anchor_graph \
 done
 ```
 
-新 records 会保存 right-censor-aware `event_timing_labels`。extended audit 应报告 event timing 的 recall、presence、onset error 和 lead-time。没有显式在线 `reuse_decisions` 时，false-safe anchor reuse 仍保持 `NOT_MEASURED`。
+新 records 会保存 right-censor-aware `offline_response_onset_diagnostics`，用于描述 source reactor 与 held-out reference reactor 的响应起始时间分布。该字段不是 CBC 的事件检测输出；source rollout 中观测到的制动 onset 不能充当 CBC 的 `predicted_trigger_s`。因此，在没有显式 CBC event-trigger transcript（至少包含冻结的 held-out event label、detector trigger timestamp、censoring/observation 状态及 action/actor 对齐键）之前，extended audit 的 `event_timing.status` 必须保持 `NOT_MEASURED`。不要把离线响应 onset 的存在误报为事件 detector recall 或 lead-time。没有显式在线 `reuse_decisions` 时，false-safe anchor reuse 仍保持 `NOT_MEASURED`。
 
 ## 7. 重复与报告规则
 
