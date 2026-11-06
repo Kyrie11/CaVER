@@ -230,7 +230,7 @@ def test_graph_and_anchor_full_active_parameter_budgets_are_matched():
 def test_equal_budget_audit_requires_same_updates_seed_data_and_active_capacity():
     from caver.validation.cbc_gate import _equal_budget_audit
     common={'optimizer_updates_per_epoch':300,'optimizer_updates_total':19500,
-            'active_parameter_count':25425,'seed':11,'contrast_weight':0.0,
+            'active_parameter_count':25425,'seed':11,'contrast_weight':0.0,'rank_weight':0.0,
             'contrastive_scenes_per_epoch':0,'contrastive_pairs_per_epoch':0,
             'contrast_threshold':.20,'training_scene_set_sha256':'same-train-split'}
     graph={**common,'active_parameter_count':25371}
@@ -253,7 +253,7 @@ def test_component_gain_requires_joint_metrics_ci_and_equal_budget_metadata(tmp_
                 'bootstrap_95pct_ci':[delta-.02,delta-.01],
                 'resamples_valid':1800,'resamples_requested':2000}
     common_meta={'optimizer_updates_per_epoch':300,'optimizer_updates_total':19500,
-                 'seed':11,'contrast_weight':0.0,
+                 'seed':11,'contrast_weight':0.0,'rank_weight':0.0,
                  'contrastive_scenes_per_epoch':0,'contrastive_pairs_per_epoch':0,
                  'contrast_threshold':.20,'training_scene_set_sha256':'train-split'}
     report={
@@ -349,7 +349,7 @@ def test_contrastive_rank_mask_rejects_explicitly_illegal_or_unmatched_pairs():
 def test_contrastive_ablation_budget_allows_loss_weight_treatment_but_requires_same_updates():
     from caver.validation.cbc_gate import _equal_budget_audit
     control={'optimizer_updates_per_epoch':300,'optimizer_updates_total':19500,
-             'active_parameter_count':25425,'seed':11,'contrast_weight':0.0,
+             'active_parameter_count':25425,'seed':11,'contrast_weight':0.0,'rank_weight':0.0,
              'contrastive_scenes_per_epoch':12,'contrastive_pairs_per_epoch':24,
              'contrast_threshold':.20,'training_scene_set_sha256':'same-train-split'}
     treatment={**control,'contrast_weight':.10}

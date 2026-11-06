@@ -13,5 +13,5 @@ python -m caver.cli collect --source synthetic --split test --scenes 4 --source-
 python -m caver.cli audit-splits --train outputs/train.jsonl --calibration outputs/calibration.jsonl --test outputs/test.jsonl --output outputs/split_audit.json
 python -m caver.cli rq-audit --input outputs/test.jsonl --checkpoint outputs/cbc.pt --output outputs/rq_audit.json
 python -m caver.cli evaluate --input outputs/test.jsonl --checkpoint outputs/cbc.pt --calibration outputs/calibration.json --output outputs/evaluation.json
-python -m caver.cli tiv-audit --input outputs/train.jsonl --output outputs/tiv_queries.jsonl --head outputs/tiv_head.pt --epochs 4
+python -m caver.cli tiv-audit --input outputs/train.jsonl --allow-same-split-audit --output outputs/tiv_queries.jsonl --head outputs/tiv_head.pt --epochs 4
 printf '\nSynthetic-only pipeline complete. See outputs/*.json. This is NOT evidence of real-road safety.\n'

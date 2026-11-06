@@ -118,7 +118,12 @@ class DelayedGraphEncoder(nn.Module):
             # Every edge uses t-lag, lag>=1. A perturbation in source time t
             # cannot alter graph encodings at any earlier time.
             agg=torch.zeros_like(h)
-            counts=torch.zeros((N,),device=h.device,dtype=h.dtype)
+            # Track the kernel mass that is actually available at each
+            # receiver/time location. A fixed full-horizon denominator would
+            # dilute messages when only a subset of incoming edges has
+            # arrived. The clamp keeps partial kernel mass explicit and
+            # preserves a zero message before the first causal arrival.
+            counts=torch.zeros((T,N),device=h.device,dtype=h.dtype)
             if edge_kernels is not None and len(edge_kernels)!=len(edges):
                 raise ValueError('Edge kernel count does not match edge count')
             for edge_index,(a,b,lag) in enumerate(edges):
@@ -131,8 +136,8 @@ class DelayedGraphEncoder(nn.Module):
                         raise ValueError('Invalid or noncausal edge kernel')
                     if kernel_lag<T and kernel_weight>0.:
                         agg[kernel_lag:,b,:]=agg[kernel_lag:,b,:]+kernel_weight*mp(h[:-kernel_lag,a,:])
-                        counts[b]+=kernel_weight
-            agg=agg/counts.clamp_min(1.)[None,:,None]
+                        counts[kernel_lag:,b]+=kernel_weight
+            agg=agg/counts.clamp_min(1.)[...,None]
             prev=torch.cat((torch.zeros_like(h[:1]),h[:-1]),dim=0)
             h=norm(h+update(torch.cat((h,prev,agg),dim=-1)))
         return h

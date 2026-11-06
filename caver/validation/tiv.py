@@ -70,21 +70,38 @@ def propose(decision,pred,actions,pairs,budget=12,deadline_ms=100.,time_now=0.):
             q.append(Query(cand,tuple(active),chain,(time_now,max(time_now+1.,time_now+4.)),source,samples,cost,latency))
     return q
 
+TIV_FEATURE_SCHEMA=(
+    'pair_risk_max','pair_risk_min','pair_risk_spread',
+    'downstream_upper_min','ego_upper_min','increment_upper_max',
+    'regret_min','regret_spread','candidate_count','pair_count',
+    'chain_count','sample_count','query_cost','query_latency','source_id',
+    'witness_count')
+
+
 class VerificationValueHead(nn.Module):
-    def __init__(self):
-        super().__init__();self.net=nn.Sequential(nn.Linear(11,64),nn.SiLU(),nn.Linear(64,64),nn.SiLU(),nn.Linear(64,1))
+    def __init__(self,input_dim=len(TIV_FEATURE_SCHEMA)):
+        super().__init__();self.input_dim=int(input_dim)
+        self.net=nn.Sequential(nn.Linear(self.input_dim,64),nn.SiLU(),nn.Linear(64,64),nn.SiLU(),nn.Linear(64,1))
     def forward(self,x):return self.net(x).squeeze(-1)
 
 def query_features(decision,pred,q):
     # Missing coordinates are unresolved evidence. Treat them as the
     # conservative upper end used by the DSE LP instead of as zero risk.
-    pp=[pred.get(f'{a}/{p}',1.) for a in q.candidates for p in q.pairs]
-    mar=[decision.margins.get(a,{}).get('downstream_upper',1.) for a in q.candidates]
-    regrets=[decision.worst_regret.get(a,5.) for a in q.candidates]
+    pp=[float(pred.get(f'{a}/{p}',1.)) for a in q.candidates for p in q.pairs]
+    mar=[float(decision.margins.get(a,{}).get('downstream_upper',1.)) for a in q.candidates]
+    ego=[float(decision.margins.get(a,{}).get('ego_upper',1.)) for a in q.candidates]
+    inc=[float(decision.margins.get(a,{}).get('max_increment_upper',1.)) for a in q.candidates]
+    regrets=[float(decision.worst_regret.get(a,5.)) for a in q.candidates]
+    down=[float(pred.get(f'{a}/down',1.)) for a in q.candidates]
     src=['more_source_samples','full_candidate_reprediction','independent_late_brake','independent_conservative',
          'physics_envelope','fresh_observation'].index(q.source)
-    return np.asarray([max(pp,default=0),min(pp,default=0),max(mar,default=1),min(regrets,default=5),
-                       len(q.candidates)/10,len(q.pairs)/10,len(q.chain)/10,q.samples/50,q.cost/20,q.presumed_latency_ms/200,src/6],np.float32)
+    return np.asarray([max(pp,default=1.),min(pp,default=1.),
+                       max(pp,default=1.)-min(pp,default=1.),
+                       min(mar,default=1.),min(ego,default=1.),max(inc,default=1.),
+                       min(regrets,default=5.),max(regrets,default=5.)-min(regrets,default=5.),
+                       len(q.candidates)/10,len(q.pairs)/10,len(q.chain)/10,
+                       q.samples/50,q.cost/20,q.presumed_latency_ms/200,src/6,
+                       len(getattr(decision,'witnesses',{}))/20],np.float32)
 
 def learn_query_value(rows,output,epochs=120):
     """Rows from two independently evaluated *same scene* policy branches.
@@ -99,8 +116,10 @@ def learn_query_value(rows,output,epochs=120):
         pred=m(X);loss=torch.nn.functional.smooth_l1_loss(pred,Y)
         opt.zero_grad();loss.backward();opt.step()
     Path(output).parent.mkdir(parents=True,exist_ok=True)
-    torch.save({'weights':m.state_dict(),'data_scope':'OFFLINE_SIMULATED_SOURCE_AUDIT','n':len(rows)},output)
-    return {'n':len(rows),'training_loss':float(loss.detach()),'output':str(output)}
+    torch.save({'weights':m.state_dict(),'data_scope':'OFFLINE_SIMULATED_SOURCE_AUDIT','n':len(rows),
+                'feature_schema':list(TIV_FEATURE_SCHEMA)},output)
+    return {'n':len(rows),'training_loss':float(loss.detach()),'output':str(output),
+            'feature_schema':list(TIV_FEATURE_SCHEMA)}
 
 
 def verify_source(scene,actions,q,seed=100):
@@ -165,5 +184,48 @@ def load_query_value(path):
     except TypeError: data=torch.load(path,map_location='cpu')
     if data.get('data_scope')!='OFFLINE_SIMULATED_SOURCE_AUDIT':
         raise ValueError('Unrecognized TIV acquisition model provenance')
-    m=VerificationValueHead();m.load_state_dict(data['weights']);m.eval()
+    weight=data['weights'].get('net.0.weight')
+    input_dim=int(weight.shape[1]) if weight is not None else len(TIV_FEATURE_SCHEMA)
+    m=VerificationValueHead(input_dim=input_dim);m.load_state_dict(data['weights']);m.eval()
     return m
+
+
+def audit_query_value(rows, value_head=None):
+    """Score signed query-value predictions on a disjoint audit transcript.
+
+    The labels are simulator-conditional execution deltas.  This diagnostic
+    reports value estimation only and never converts a positive score into a
+    safety or release certificate.
+    """
+    rows=list(rows)
+    if value_head is None or not rows:
+        return {'status':'NOT_MEASURED','n':len(rows),'reason':'missing value head or audit rows'}
+    value_head.eval()
+    X=torch.tensor(np.asarray([r['features'] for r in rows],np.float32))
+    y=np.asarray([float(r['signed_value']) for r in rows],dtype=float)
+    with torch.no_grad():
+        pred=value_head(X).cpu().numpy().astype(float)
+    if not np.all(np.isfinite(pred)) or not np.all(np.isfinite(y)):
+        return {'status':'INVALID','n':len(rows),'reason':'nonfinite value prediction or label'}
+    mae=float(np.mean(np.abs(pred-y)))
+    rmse=float(np.sqrt(np.mean((pred-y)**2)))
+    corr=None
+    if len(rows)>1 and np.std(pred)>0. and np.std(y)>0.:
+        corr=float(np.corrcoef(pred,y)[0,1])
+    # Grouped top-1 selection checks whether the learned head identifies the
+    # best audited source within each scene, without claiming a causal gain.
+    groups={}
+    for i,row in enumerate(rows):
+        groups.setdefault(str(row.get('scene_id',i)),[]).append(i)
+    top1=[]
+    for idx in groups.values():
+        if len(idx)<2:continue
+        top1.append(float(idx[int(np.argmax(pred[idx]))]==idx[int(np.argmax(y[idx]))]))
+    return {'status':'MEASURED','n':len(rows),'scene_groups':len(groups),
+            'signed_value_mae':mae,'signed_value_rmse':rmse,
+            'signed_value_pearson':corr,
+            'actual_positive_rate':float(np.mean(y>0.)),
+            'predicted_positive_rate':float(np.mean(pred>0.)),
+            'scene_top1_best_source_rate':float(np.mean(top1)) if top1 else None,
+            'label_scope':'SIMULATOR_CONDITIONAL_OFFLINE_QUERY_AUDIT',
+            'query_is_certificate':False}

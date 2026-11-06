@@ -33,6 +33,7 @@ EPOCHS="${EPOCHS:-65}"
 GRAPH_EPOCHS="${GRAPH_EPOCHS:-$EPOCHS}"
 BOOTSTRAP="${BOOTSTRAP:-2000}"
 CONTRAST_WEIGHT="${CONTRAST_WEIGHT:-0.10}"
+RANK_WEIGHT="${RANK_WEIGHT:-0.10}"
 SEED="${SEED:-11}"
 if [[ "${ALLOW_UNMATCHED_EPOCHS:-0}" != "1" && "$GRAPH_EPOCHS" != "$EPOCHS" ]];then
   echo "ERROR: anchor_full and anchor_graph must use the same optimizer updates; set GRAPH_EPOCHS=EPOCHS or ALLOW_UNMATCHED_EPOCHS=1." >&2
@@ -55,11 +56,11 @@ train_one() {
   if [[ "$GPU_COUNT" -ge 2 ]];then
     CUDA_VISIBLE_DEVICES="$gpu" python -m caver.cli train-cbc --input "$TRAIN" \
        --variant "$variant" --epochs "$epochs" --device "$DEVICE" \
-       --contrast-weight "$weight" --seed "$SEED" --output "$OUT/cbc_${name}.pt" \
+       --contrast-weight "$weight" --rank-weight "$RANK_WEIGHT" --seed "$SEED" --output "$OUT/cbc_${name}.pt" \
        >"$OUT/train_${name}.log" 2>&1
   else
     python -m caver.cli train-cbc --input "$TRAIN" --variant "$variant" \
-       --epochs "$epochs" --device "$DEVICE" --contrast-weight "$weight" --seed "$SEED" \
+       --epochs "$epochs" --device "$DEVICE" --contrast-weight "$weight" --rank-weight "$RANK_WEIGHT" --seed "$SEED" \
        --output "$OUT/cbc_${name}.pt" >"$OUT/train_${name}.log" 2>&1
   fi
 }

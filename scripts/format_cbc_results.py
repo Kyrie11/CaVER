@@ -17,12 +17,16 @@ def main():
     p.add_argument('--output-prefix',required=True)
     args=p.parse_args()
     d=json.loads(Path(args.study).read_text())
-    chosen=('source','anchor_copy','no_events','full','anchor_full','anchor_graph')
+    chosen=('source','anchor_copy','no_events','full','anchor_full','anchor_graph',
+            'anchor_graph_delay_kernel','delay_kernel_rank')
     cols=['Method','Critical N','Resolved N','Sign error resolved','Underresolution',
-          'Near-boundary pair MAE','Union-risk MAE','Matched safety regret']
+          'Near-boundary pair MAE','Union-risk MAE','Union sign resolved',
+          'Union underresolution resolved','Matched safety regret']
     mapping=['critical_pair_tests','critical_pair_ref_sign_resolved',
              'reference_resolved_sign_error_rate','critical_pair_underresolution_rate',
              'near_boundary_pair_risk_mae','downstream_union_reference_risk_mae',
+             'downstream_union_resolved_sign_error_rate',
+             'downstream_union_resolved_underresolution_rate',
              'matched_ego_safe_safety_ranking_regret']
     lines=[]
     for name in chosen:

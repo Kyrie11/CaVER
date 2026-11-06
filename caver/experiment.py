@@ -47,7 +47,21 @@ def stress_scene(seed, config='configs/fourcar_challenge.json'):
     return sc.validate()
 
 
-def stress_actions():
+def stress_actions(profile='default'):
+    """Return intent-matched actions for the synthetic stress protocol.
+
+    The default profile preserves the original coarse contrast.  The boundary
+    profile keeps the same maneuver and task template while placing the two
+    candidates close to the response transition.  It is deliberately exposed
+    as a data-generation choice so a ranking claim cannot be supported only by
+    an easy, already-separated pair.
+    """
+    if profile == 'boundary':
+        return [Action('early',1.20,2.40,1.8,accel_ramp_s=.40),
+                Action('late',1.45,2.65,1.8,accel_ramp_s=.40),
+                Action('reference',9.,10.,0.,lane_offset=0.)]
+    if profile != 'default':
+        raise ValueError('Unknown synthetic stress action profile')
     return [Action('early',.5,1.6,1.8,accel_ramp_s=.40),
             Action('late',1.9,3.,1.8,accel_ramp_s=.40),
             Action('reference',9.,10.,0.,lane_offset=0.)]
@@ -214,14 +228,17 @@ def paired_scene(scene,actions=None,source_family='delayed_idm',audit_families=(
     # must capture the same fields at the planner callback boundary.
     t_total=time.perf_counter(); source_ms=0.; reference_ms=0.; feature_ms=0.; model_ms=0.
     source_calls=0; reference_calls=0
-    source_by_action={};ref_by_action={};prediction={};reference={};diagnostics={};temporal={}
+    source_by_action={};ref_by_action={};ref_by_family={};prediction={};reference={};diagnostics={};temporal={}
     # Same latent world seeds for all candidate actions within each family.
     for a in actions:
         t0=time.perf_counter()
         src=[rollout(scene,a,sample_world(scene,seed+k,source_family),response_net=source_policy) for k in range(source_worlds)]
         source_ms+=(time.perf_counter()-t0)*1000.; source_calls+=len(src)
         t0=time.perf_counter()
-        ref=[rollout(scene,a,sample_world(scene,100000+seed+k,fam)) for fam in audit_families for k in range(audit_worlds)]
+        ref_by_family[a.action_id]={
+            fam:[rollout(scene,a,sample_world(scene,100000+seed+k,fam))
+                 for k in range(audit_worlds)] for fam in audit_families}
+        ref=[r for family in ref_by_family[a.action_id].values() for r in family]
         reference_ms+=(time.perf_counter()-t0)*1000.; reference_calls+=len(ref)
         source_by_action[a.action_id]=src;ref_by_action[a.action_id]=ref
         # Encodes *source reactor predicted* time series only. Auditor target
@@ -245,9 +262,19 @@ def paired_scene(scene,actions=None,source_family='delayed_idm',audit_families=(
     prediction=coherent_project(prediction,[a.action_id for a in actions],pairs)
     matching=action_match_audit(actions,source_by_action,[x.agent_id for x in scene.agents].index(scene.ego_id),scene.dt)
     boundary=paired_boundary_diagnostics(source_by_action,ref_by_action,pairs,actions,scene.dt)
+    audited_by_family={}
+    for fam in audit_families:
+        audited_by_family[fam]={}
+        for a in actions:
+            xs=ref_by_family[a.action_id][fam]
+            audited_by_family[fam][f'{a.action_id}/ego']=float(np.mean([r['ego_collision'] for r in xs]))
+            audited_by_family[fam][f'{a.action_id}/down']=float(np.mean([r['downstream_collision'] for r in xs]))
+            for p in pairs:
+                audited_by_family[fam][f'{a.action_id}/{p}']=_pair_target(xs,p)[0]
     record={'scene_id':scene.scene_id,'scene':scene.to_json(),'source_family':source_family,'audit_families':list(audit_families),
             'source_worlds':source_worlds,'audit_worlds_per_family':audit_worlds,
             'actions':[asdict(a) for a in actions],'pairs':pairs,'predicted':prediction,'audited':reference,
+            'audited_by_family':audited_by_family,
             'diagnostics':diagnostics,'temporal':temporal,'candidate_matching':matching,
             'boundary_diagnostics':boundary,
             'offline_response_onset_diagnostics':_offline_response_onset_diagnostics(
@@ -325,7 +352,46 @@ def _contrastive_reference_mask(row, contrast_threshold=.20, alpha=.05):
     return mask if bool(np.any(mask)) else None
 
 
-def fit_cbc(records,output,epochs=75,seed=11,variant='full',device='auto',contrast_weight=0.):
+def _ranking_reference_target(row, contrast_threshold=.20, alpha=.05):
+    """Return a resolved downstream-union contrast for boundary ranking.
+
+    The target is retained only for matched, ego-safe candidates whose
+    reference union-risk difference exceeds the finite-MC resolution radius.
+    It is a simulator-conditional ranking label and never a physical safety
+    label.
+    """
+    match=row.get('candidate_matching',{}).get('pairs',{}).get('early|late',{})
+    if not match.get('matched_kinematic_proxy',False):
+        return None
+    if match.get('same_maneuver_intent') is not True:
+        return None
+    if match.get('kinematic_feasible_both') is not True:
+        return None
+    try:
+        d_e=float(match.get('d_e')); d_e_max=float(match.get('delta_e_max'))
+        d_j=float(match.get('task_cost_difference')); d_j_max=float(match.get('delta_J_max'))
+    except (TypeError,ValueError):
+        return None
+    if not (math.isfinite(d_e) and math.isfinite(d_e_max) and d_e<=d_e_max
+            and math.isfinite(d_j) and math.isfinite(d_j_max) and d_j<=d_j_max):
+        return None
+    law=match.get('lawful_route_match')
+    if law is False:
+        return None
+    try:
+        if float(row['audited']['early/ego'])>.05 or float(row['audited']['late/ego'])>.05:
+            return None
+        delta=float(row['audited']['early/down'])-float(row['audited']['late/down'])
+    except (KeyError,TypeError,ValueError):
+        return None
+    if not math.isfinite(delta) or abs(delta)<float(contrast_threshold):
+        return None
+    n_worlds=int(row.get('audit_worlds_per_family',0))*len(row.get('audit_families',[]))
+    radius=finite_mc_radius(n_worlds,max(1,len(row.get('pairs',[]))),alpha)
+    return float(delta) if abs(delta)>radius else None
+
+
+def fit_cbc(records,output,epochs=75,seed=11,variant='full',device='auto',contrast_weight=0.,rank_weight=0.):
     """Train every CBC variant with an identical optimizer-update schedule.
 
     Every (scene, action) group contributes exactly one optimizer update.
@@ -337,7 +403,7 @@ def fit_cbc(records,output,epochs=75,seed=11,variant='full',device='auto',contra
     if str(device).startswith('cuda') and not torch.cuda.is_available():
         raise ValueError('CUDA requested but torch.cuda.is_available() is false; install an appropriate CUDA PyTorch wheel')
     dev=torch.device(device)
-    if contrast_weight<0:raise ValueError('contrast_weight must be nonnegative')
+    if contrast_weight<0 or rank_weight<0:raise ValueError('loss weights must be nonnegative')
     if epochs<1:raise ValueError('epochs must be positive')
     records=list(records)
     if any(r.get('experimental_split') not in ('train',None) for r in records):
@@ -347,6 +413,7 @@ def fit_cbc(records,output,epochs=75,seed=11,variant='full',device='auto',contra
     uses_graph=variant in ('graph','anchor_graph','anchor_graph_event','anchor_graph_event_local','anchor_graph_delay_kernel')
     training_groups=[]
     contrastive_data={}
+    ranking_data={}
     example_count=0
     for row_index,row in enumerate(records):
         pairs=row['pairs']
@@ -393,6 +460,9 @@ def fit_cbc(records,output,epochs=75,seed=11,variant='full',device='auto',contra
                 'traces':{'early':action_traces['early'],'late':action_traces['late']},
                 'pairs':pairs,'target':target,'mask':torch.as_tensor(contrast_mask,dtype=torch.bool)
             }
+        ranking_target=_ranking_reference_target(row,contrast_threshold=.20,alpha=.05)
+        if ranking_target is not None and 'early' in action_features and 'late' in action_features:
+            ranking_data[row_index]=float(ranking_target)
 
     if example_count<6 or len(training_groups)<2:
         raise ValueError('Need >=6 pairs and >=2 joint candidate labels')
@@ -461,6 +531,25 @@ def fit_cbc(records,output,epochs=75,seed=11,variant='full',device='auto',contra
                     .04-torch.sign(target[active])*estimate[active]).mean()
                 loss=loss+contrast_weight*(reg+.1*margin)
 
+            # A separate scene-level ranking term trains the quantity that the
+            # planner actually consumes.  It uses the joint downstream-union
+            # head, while the pairwise contrast term above remains useful for
+            # localizing a mediator boundary.  The term is added to an existing
+            # update and therefore does not change the equal-update budget.
+            if rank_weight>0 and action=='late' and row_index in ranking_data:
+                early_features=action_features['early'].to(dev)
+                late_features=action_features['late'].to(dev)
+                if uses_graph:
+                    _,early_context=m.graph_model(early_features,action_traces['early'],pairs,return_summary=True)
+                    _,late_context=m.graph_model(late_features,action_traces['late'],pairs,return_summary=True)
+                else:
+                    early_context=late_context=None
+                early_union=m.joint(early_features,early_context)[1]
+                late_union=m.joint(late_features,late_context)[1]
+                signed=float(np.sign(ranking_data[row_index]))
+                loss=loss+rank_weight*torch.nn.functional.softplus(
+                    .05-torch.as_tensor(signed,dtype=early_union.dtype,device=dev)*(early_union-late_union))
+
             opt.zero_grad();loss.backward()
             torch.nn.utils.clip_grad_norm_(active_parameters,3.);opt.step()
             optimizer_updates+=1
@@ -479,7 +568,8 @@ def fit_cbc(records,output,epochs=75,seed=11,variant='full',device='auto',contra
                    'optimizer_updates_total':optimizer_updates,
                    'contrastive_scenes_per_epoch':len(contrastive_data),
                    'contrastive_pairs_per_epoch':contrastive_pair_count,
-                   'contrast_threshold':.20,
+                   'contrast_threshold':.20,'rank_weight':rank_weight,
+                   'ranking_scenes_per_epoch':len(ranking_data),
                    'active_parameter_count':active_parameter_count,
                    'total_parameter_count':total_parameter_count,
                    'graph_channels':16 if uses_graph else None,
@@ -497,7 +587,8 @@ def fit_cbc(records,output,epochs=75,seed=11,variant='full',device='auto',contra
             'epochs':epochs,'optimizer_updates_per_epoch':updates_per_epoch,
             'optimizer_updates_total':optimizer_updates,
             'contrastive_scenes_per_epoch':len(contrastive_data),
-            'contrastive_pairs_per_epoch':contrastive_pair_count,
+             'contrastive_pairs_per_epoch':contrastive_pair_count,
+             'rank_weight':rank_weight,'ranking_scenes_per_epoch':len(ranking_data),
             'contrast_threshold':.20,
             'active_parameter_count':active_parameter_count,
             'total_parameter_count':total_parameter_count}
@@ -564,6 +655,17 @@ def evaluate(records,calibration=None,eps_down=.7,eps_ego=.7,eps_inc=.8,eps_reg=
                  eps_reg=eps_reg,task_cost=task,strict_prefix=strict_prefix)
         selected=d.chosen
         ref=row['audited']
+        family_coverage={}
+        family_downstream={}
+        for family,labels in row.get('audited_by_family',{}).items():
+            checks=[]
+            for k,p in row['predicted'].items():
+                if k not in labels or calibration is None:
+                    continue
+                lo,hi=calibration.interval(row['predicted'][k],key=k)
+                checks.append(bool(lo<=labels[k]<=hi))
+            family_coverage[family]=float(np.mean(checks)) if checks else None
+            family_downstream[family]=float(labels.get(f'{selected}/down')) if selected is not None and f'{selected}/down' in labels else None
         truth_safe={a for a in acts if ref[f'{a}/ego']<=eps_ego and ref[f'{a}/down']<=eps_down}
         if selected is not None:
             regret=max(0.,ref[f'{selected}/down']-min([ref[f'{a}/down'] for a in truth_safe] or [1.]))
@@ -572,6 +674,8 @@ def evaluate(records,calibration=None,eps_down=.7,eps_ego=.7,eps_inc=.8,eps_reg=
                         'admitted':d.candidates,'margins':d.margins,'gamma_R':d.gamma_robust,'gamma_P':d.gamma_plausible,
                         'worst_witnesses':d.witnesses,'regret_on_audited_reactor':regret,
                         'reference_downstream_risk':ref.get(f'{selected}/down') if selected is not None else None,
+                        'family_evidence_coverage':family_coverage,
+                        'family_selected_downstream_risk':family_downstream,
                         'accepted_wrong':bool(selected is not None and selected not in truth_safe),
                         'evidence_coverage':all((calibration.interval(row['predicted'][k],key=k)[0]<=ref[k]<=calibration.interval(row['predicted'][k],key=k)[1]) for k in ref) if calibration else None,
                         'reason':d.reason,'warnings':['simulator conditional','strict_prefix='+str(strict_prefix)]})
@@ -582,6 +686,11 @@ def evaluate(records,calibration=None,eps_down=.7,eps_ego=.7,eps_inc=.8,eps_reg=
     for row in outputs:
         for margin in row.get('margins',{}).values():
             for name in margin.get('failed_constraints',[]): failed_constraints[name]+=1
+    family_names=sorted({f for row in outputs for f in row.get('family_evidence_coverage',{})})
+    worst_family_coverage={f:float(np.mean([row['family_evidence_coverage'][f] for row in outputs
+                                             if row.get('family_evidence_coverage',{}).get(f) is not None]))
+                          if any(row.get('family_evidence_coverage',{}).get(f) is not None for row in outputs) else None
+                          for f in family_names}
     return {'scenes':n,'accepted':len(accepted),'abstain':n-len(accepted),
             'risk_admissible_scene_coverage':len(risk_admitted)/n if n else None,
             'decision_certified_scene_coverage':len(decision_certified)/n if n else None,
@@ -589,6 +698,7 @@ def evaluate(records,calibration=None,eps_down=.7,eps_ego=.7,eps_inc=.8,eps_reg=
             'audit_wrong_choice_rate_accepted':float(np.mean([r['accepted_wrong'] for r in accepted])) if accepted else None,
             'audit_decision_regret_accepted':float(np.mean([r['regret_on_audited_reactor'] for r in accepted])) if accepted else None,
             'joint_interval_coverage':float(np.mean([r['evidence_coverage'] for r in outputs])) if calibration else None,
+            'family_interval_coverage':worst_family_coverage,
             'failed_constraint_counts':dict(failed_constraints),
             'rows':outputs,'independent_field_validation':False}
 

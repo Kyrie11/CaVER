@@ -37,8 +37,8 @@ def parser():
     s=sub.add_parser('fourcar-challenge');s.add_argument('--config',default='configs/fourcar_challenge.json');s.add_argument('--output',required=True)
     s=sub.add_parser('fourcar-mediation');s.add_argument('--out',required=True);s.add_argument('--seed',type=int,default=10);s.add_argument('--world-seed',type=int,default=10);s.add_argument('--family',default='late_brake')
     s=sub.add_parser('fourcar-scan');s.add_argument('--out',required=True);s.add_argument('--scenes',type=int,default=100);s.add_argument('--worlds',type=int,default=3);s.add_argument('--seed',type=int,default=100)
-    s=sub.add_parser('collect');s.add_argument('--source',choices=['synthetic','synthetic-stress','womd-jsonl','nuplan-jsonl'],default='synthetic');s.add_argument('--input');s.add_argument('--split',choices=['train','calibration','test'],required=True);s.add_argument('--scenes',type=int,default=20);s.add_argument('--source-worlds',type=int,default=4);s.add_argument('--audit-worlds',type=int,default=16);s.add_argument('--checkpoint');s.add_argument('--source-family',choices=['delayed_idm','learned_logged','stress_source'],default='delayed_idm');s.add_argument('--policy-checkpoint');s.add_argument('--candidate-policy',choices=['fixed','observed-adaptive'],default='fixed');s.add_argument('--output',required=True)
-    s=sub.add_parser('train-cbc');s.add_argument('--input',required=True);s.add_argument('--variant',choices=['full','no_events','graph','anchor_full','anchor_graph','anchor_graph_event','anchor_graph_event_local','anchor_graph_delay_kernel'],default='full');s.add_argument('--epochs',type=int,default=80);s.add_argument('--device',default='auto');s.add_argument('--contrast-weight',type=float,default=0.);s.add_argument('--seed',type=int,default=11);s.add_argument('--output',required=True)
+    s=sub.add_parser('collect');s.add_argument('--source',choices=['synthetic','synthetic-stress','womd-jsonl','nuplan-jsonl'],default='synthetic');s.add_argument('--input');s.add_argument('--split',choices=['train','calibration','test'],required=True);s.add_argument('--scenes',type=int,default=20);s.add_argument('--source-worlds',type=int,default=4);s.add_argument('--audit-worlds',type=int,default=16);s.add_argument('--checkpoint');s.add_argument('--source-family',choices=['delayed_idm','learned_logged','stress_source'],default='delayed_idm');s.add_argument('--policy-checkpoint');s.add_argument('--candidate-policy',choices=['fixed','observed-adaptive'],default='fixed');s.add_argument('--stress-profile',choices=['default','boundary'],default='default');s.add_argument('--output',required=True)
+    s=sub.add_parser('train-cbc');s.add_argument('--input',required=True);s.add_argument('--variant',choices=['full','no_events','graph','anchor_full','anchor_graph','anchor_graph_event','anchor_graph_event_local','anchor_graph_delay_kernel'],default='full');s.add_argument('--epochs',type=int,default=80);s.add_argument('--device',default='auto');s.add_argument('--contrast-weight',type=float,default=0.);s.add_argument('--rank-weight',type=float,default=0.);s.add_argument('--seed',type=int,default=11);s.add_argument('--output',required=True)
     s=sub.add_parser('cbc-study',help='Compact held-out CBC baseline/ablation comparison')
     s.add_argument('--input',required=True)
     s.add_argument('--model',action='append',default=[],help='label=checkpoint.pt; repeat')
@@ -68,7 +68,7 @@ def parser():
     s.add_argument('--output',required=True)
     s=sub.add_parser('evaluate');s.add_argument('--input',required=True);s.add_argument('--checkpoint');s.add_argument('--calibration');s.add_argument('--eps-ego',type=float,default=.08);s.add_argument('--eps-down',type=float,default=.12);s.add_argument('--eps-inc',type=float,default=.1);s.add_argument('--eps-reg',type=float,default=1.5);s.add_argument('--surrogate-prefix-check',action='store_true',help='Simulation-only prefix check assumption; NOT a physical field certificate');s.add_argument('--output',required=True)
     s=sub.add_parser('audit-splits');s.add_argument('--train',required=True);s.add_argument('--calibration',required=True);s.add_argument('--test',required=True);s.add_argument('--output',required=True)
-    s=sub.add_parser('tiv-audit');s.add_argument('--input',required=True);s.add_argument('--validation');s.add_argument('--output',required=True);s.add_argument('--head',required=True);s.add_argument('--epochs',type=int,default=120);s.add_argument('--budget',type=float,default=12.)
+    s=sub.add_parser('tiv-audit');s.add_argument('--input',required=True);s.add_argument('--validation',help='Disjoint scene/overlap-group records required for a held-out value audit.');s.add_argument('--provisional-calibration',help='Optional frozen development calibration JSON used only to form LP witnesses and query features. It never certifies release.');s.add_argument('--allow-same-split-audit',action='store_true',help='Exploratory smoke mode only. Reusing train records is not a held-out value audit.');s.add_argument('--output',required=True);s.add_argument('--head',required=True);s.add_argument('--epochs',type=int,default=120);s.add_argument('--budget',type=float,default=12.)
     s=sub.add_parser('carla-check');s.add_argument('--host');s.add_argument('--port',type=int);s.add_argument('--timeout',type=float,default=8.);s.add_argument('--output')
     s=sub.add_parser('carla-run');s.add_argument('--host');s.add_argument('--port',type=int);s.add_argument('--town',default='Town04');s.add_argument('--out',required=True);s.add_argument('--step',type=float,default=.05);s.add_argument('--horizon',type=float,default=8.)
     return p
@@ -240,7 +240,7 @@ def run(args):
             raise ValueError('Observed-adaptive candidate control policy is for observation-first corridor experiments')
         rec=[]
         for i,sc in enumerate(scenes):
-            actions=(stress_actions() if args.source=='synthetic-stress' else None)
+            actions=(stress_actions(args.stress_profile) if args.source=='synthetic-stress' else None)
             candidate_meta={'policy':'FIXED_TEMPLATE_V1','map_law_route_feasibility':'UNVERIFIED'}
             if args.candidate_policy=='observed-adaptive':
                 from caver.models.candidate_policy import choose_observation_only_actions
@@ -255,10 +255,11 @@ def run(args):
         store_records(rec,args.output)
         report({'split':args.split,'records':len(rec),'output':args.output,
                 'reference_families':list(audit_families),
-                'reference_type':'SIMULATED_NOT_REAL_CAUSAL_LABEL','candidate_policy':args.candidate_policy,**stats})
+                'reference_type':'SIMULATED_NOT_REAL_CAUSAL_LABEL','candidate_policy':args.candidate_policy,
+                'stress_profile':args.stress_profile if args.source=='synthetic-stress' else None,**stats})
     elif args.cmd=='train-cbc':
         from caver.experiment import fit_cbc,read_records
-        report(fit_cbc(list(read_records(args.input)),args.output,epochs=args.epochs,variant=args.variant,device=args.device,contrast_weight=args.contrast_weight,seed=args.seed))
+        report(fit_cbc(list(read_records(args.input)),args.output,epochs=args.epochs,variant=args.variant,device=args.device,contrast_weight=args.contrast_weight,rank_weight=args.rank_weight,seed=args.seed))
     elif args.cmd=='cbc-study':
         from caver.validation.cbc_study import study
         files={}
@@ -346,13 +347,16 @@ def run(args):
             raise ValueError('Split leakage detected: duplicated scenario or shared map/log group')
     elif args.cmd=='tiv-audit':
         from caver.experiment import read_records
-        from caver.validation.evidence import choose
-        from caver.validation.tiv import propose,verify_source,query_features,learn_query_value
+        from caver.validation.evidence import choose,Calibration
+        from caver.validation.tiv import propose,verify_source,query_features,learn_query_value,load_query_value,audit_query_value
         from caver.data.schema import Scene
         from caver.sim.traffic import Action
         rec=list(read_records(args.input));training=[];audit=[]
+        provisional_calibration=Calibration.load(args.provisional_calibration) if args.provisional_calibration else None
         if not rec or any(r.get('experimental_split')!='train' for r in rec):
             raise ValueError('TIV acquisition-head training requires --split train; never test/calibration reference labels')
+        if args.validation is None and not args.allow_same_split_audit:
+            raise ValueError('TIV requires a disjoint --validation split; use --allow-same-split-audit only for exploratory smoke tests')
         validation=list(read_records(args.validation)) if args.validation else rec
         if not validation or any(r.get('experimental_split') not in ('train','calibration','test') for r in validation):
             raise ValueError('TIV validation records must use train, calibration or test split')
@@ -372,7 +376,7 @@ def run(args):
             result=[]
             for row in rows:
                 acts=[Action(**a) for a in row['actions']];names=[a.action_id for a in acts]
-                d=choose(row['predicted'],names,row['pairs'],calibration=None)
+                d=choose(row['predicted'],names,row['pairs'],calibration=provisional_calibration)
                 queries=propose(d,row['predicted'],names,row['pairs'],budget=args.budget,deadline_ms=110)
                 scene=Scene.from_json(row['scene'])
                 base=min(names,key=lambda a:row['predicted'][a+'/down']+(.5 if a=='reference' else 0.))
@@ -387,18 +391,45 @@ def run(args):
                     selected=min(names,key=lambda a:pv[a+'/down']+(.5 if a=='reference' else 0.))
                     gain=oracle(base)-oracle(selected)-.001*q.cost-.0002*q.presumed_latency_ms
                     result.append({'scene_id':row['scene_id'],'source':q.source,'before':base,'after':selected,
+                                   'action_changed':bool(base!=selected),
                                    'signed_value':float(gain),'features':query_features(d,row['predicted'],q).tolist(),
-                                   'evaluated_reference':row['audit_families'],'query_is_certificate':False})
+                                   'evaluated_reference':row['audit_families'],'query_is_certificate':False,
+                                   'query_contract':{'candidate_actions':list(q.candidates),
+                                                     'affected_pairs':list(q.pairs),
+                                                     'mediator_chain':list(q.chain),
+                                                     'window':list(q.window),
+                                                     'samples':q.samples,'cost':q.cost,
+                                                     'presumed_latency_ms':q.presumed_latency_ms},
+                                   'before_objective':float(oracle(base)),
+                                   'after_objective':float(oracle(selected)),
+                                   'query_measured_walltime_ms':out.get('measured_walltime_ms'),
+                                   'query_outcome_count':len(out.get('outcomes',[]))})
             return result
 
         training=build_labels(rec)
         audit=build_labels(validation)
         Path(args.output).parent.mkdir(parents=True,exist_ok=True)
         Path(args.output).write_text('\n'.join(json.dumps(a) for a in audit)+'\n')
-        if len(training)>=6:status=learn_query_value(training,args.head,args.epochs)
-        else:status={'trained':False,'reason':'Insufficient audited query labels','n':len(training)}
+        if len(training)>=6:
+            status=learn_query_value(training,args.head,args.epochs)
+            value_metrics=audit_query_value(audit,load_query_value(args.head))
+        else:
+            status={'trained':False,'reason':'Insufficient audited query labels','n':len(training)}
+            value_metrics={'status':'NOT_MEASURED','n':len(audit),'reason':'head not trained'}
+        def audit_summary(rows):
+            vals=[float(r['signed_value']) for r in rows]
+            return {'n':len(rows),
+                    'action_change_rate':float(np.mean([r['action_changed'] for r in rows])) if rows else None,
+                    'mean_signed_value':float(np.mean(vals)) if vals else None,
+                    'positive_value_rate':float(np.mean([v>0 for v in vals])) if vals else None,
+                    'source_counts':{s:sum(r['source']==s for r in rows) for s in sorted({r['source'] for r in rows})}}
         report({'training_records':len(training),'validation_records':len(audit),'audit':args.output,'head':status,
                 'same_file_train_validation':not bool(args.validation),
+                'heldout_value_audit':bool(args.validation),
+                'provisional_calibration':args.provisional_calibration,
+                'training_audit_summary':audit_summary(training),
+                'validation_audit_summary':audit_summary(audit),
+                'value_metrics':value_metrics,
                 'warning':'Signed synthetic proxy acquisition targets only; no terminal release calibration or independent physical reference'})
     elif args.cmd=='carla-check':
         from caver.integrations.carla_runner import preflight

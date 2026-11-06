@@ -13,6 +13,8 @@ _COMPONENT_METRICS = (
     'reference_resolved_sign_error_rate',
     'critical_pair_underresolution_rate',
     'critical_pair_miss_rate',
+    'downstream_union_resolved_sign_error_rate',
+    'downstream_union_resolved_underresolution_rate',
     'matched_ego_safe_safety_ranking_regret',
 )
 
@@ -102,13 +104,14 @@ def _noninferior_point_gain(method, control):
     return bool(values) and strict and all(values)
 
 
-def _equal_budget_audit(report, method_name, control_name, parameter_tolerance=.01, contrast_weight_mode='equal'):
+def _equal_budget_audit(report, method_name, control_name, parameter_tolerance=.01,
+                        contrast_weight_mode='equal', rank_weight_mode='equal'):
     """Verify same training data/seed/updates and near-equal active parameters."""
     checkpoints=report.get('checkpoints',{})
     method=checkpoints.get(method_name,{}).get('training_meta',{})
     control=checkpoints.get(control_name,{}).get('training_meta',{})
     required=('optimizer_updates_per_epoch','optimizer_updates_total',
-              'active_parameter_count','seed','contrast_weight',
+              'active_parameter_count','seed','contrast_weight','rank_weight',
               'contrastive_scenes_per_epoch','contrastive_pairs_per_epoch','contrast_threshold',
               'training_scene_set_sha256')
     missing=[key for key in required
@@ -121,12 +124,17 @@ def _equal_budget_audit(report, method_name, control_name, parameter_tolerance=.
     updates_total_equal=(int(method['optimizer_updates_total'])==
                          int(control['optimizer_updates_total']))
     seed_equal=(int(method['seed'])==int(control['seed']))
+    rank_equal=math.isclose(float(method['rank_weight']),float(control['rank_weight']),rel_tol=0.,abs_tol=1e-12)
+    rank_higher=float(method['rank_weight'])>float(control['rank_weight'])
     contrast_equal=math.isclose(float(method['contrast_weight']),
                                 float(control['contrast_weight']),rel_tol=0.,abs_tol=1e-12)
     contrast_higher=float(method['contrast_weight'])>float(control['contrast_weight'])
     if contrast_weight_mode not in ('equal','higher'):
         raise ValueError('contrast_weight_mode must be equal or higher')
     contrast_weight_ok=contrast_equal if contrast_weight_mode=='equal' else contrast_higher
+    if rank_weight_mode not in ('equal','higher'):
+        raise ValueError('rank_weight_mode must be equal or higher')
+    rank_weight_ok=rank_equal if rank_weight_mode=='equal' else rank_higher
     contrast_scenes_equal=(int(method['contrastive_scenes_per_epoch'])==
                            int(control['contrastive_scenes_per_epoch']))
     contrast_pairs_equal=(int(method['contrastive_pairs_per_epoch'])==
@@ -144,12 +152,14 @@ def _equal_budget_audit(report, method_name, control_name, parameter_tolerance=.
             'optimizer_updates_total_equal':updates_total_equal,
             'active_parameter_ratio':parameter_ratio,
             'active_parameters_within_tolerance':parameter_matched,
-            'seed_equal':seed_equal,'contrast_weight_equal':contrast_equal,
+            'seed_equal':seed_equal,'rank_weight_equal':rank_equal,
+            'contrast_weight_equal':contrast_equal,
             'contrast_weight_treatment_higher':contrast_higher,
             'contrastive_scene_count_equal':contrast_scenes_equal,
             'contrastive_pair_count_equal':contrast_pairs_equal,
             'contrast_threshold_equal':contrast_threshold_equal,
-            'training_scene_set_equal':split_equal}
+            'training_scene_set_equal':split_equal,
+            'rank_weight_mode_satisfied':rank_weight_ok}
     checks['contrast_weight_mode_satisfied']=contrast_weight_ok
     status='MATCHED' if all(v for k,v in checks.items()
                             if k not in ('active_parameter_ratio','contrast_weight_equal',
@@ -217,6 +227,8 @@ def summarize(study_path, boundary_path=None, min_resolved=30,
             'all_critical_miss_rate':m.get('critical_pair_miss_rate'),
             'near_boundary_pair_risk_mae':m.get('near_boundary_pair_risk_mae'),
             'union_risk_mae':m.get('downstream_union_reference_risk_mae'),
+            'union_resolved_sign_error_rate':m.get('downstream_union_resolved_sign_error_rate'),
+            'union_resolved_underresolution_rate':m.get('downstream_union_resolved_underresolution_rate'),
             'matched_pair_ranking_regret':m.get('matched_ego_safe_safety_ranking_regret')}
 
     boundary=None
@@ -242,6 +254,8 @@ def summarize(study_path, boundary_path=None, min_resolved=30,
         report.get('paired_scene_bootstrap_anchor_graph_event_local_minus_anchor_graph',{}))
     delay_kernel_vs_graph=_joint_ci_support(
         report.get('paired_scene_bootstrap_anchor_graph_delay_kernel_minus_anchor_graph',{}))
+    delay_kernel_rank_vs_kernel=_joint_ci_support(
+        report.get('paired_scene_bootstrap_delay_kernel_rank_minus_delay_kernel',{}))
 
     graph_point_advantage=_strict_point_gain(graph,anchor_no_graph)
     graph_point_noninferior=_noninferior_point_gain(graph,anchor_no_graph)
@@ -263,6 +277,8 @@ def summarize(study_path, boundary_path=None, min_resolved=30,
         report,'full_contrast','full',contrast_weight_mode='higher')
     graph_contrast_budget=_equal_budget_audit(
         report,'anchor_graph_contrast','anchor_graph',contrast_weight_mode='higher')
+    ranking_budget=_equal_budget_audit(
+        report,'delay_kernel_rank','anchor_graph_delay_kernel',rank_weight_mode='higher')
 
     graph_component_supported=(graph_point_advantage
         and graph_vs_no_graph['status']=='SUPPORTS_INCREMENTAL_GAIN'
@@ -276,15 +292,20 @@ def summarize(study_path, boundary_path=None, min_resolved=30,
     graph_contrast_supported=(graph_contrast_point
         and graph_contrast_ci['status']=='SUPPORTS_INCREMENTAL_GAIN'
         and graph_contrast_budget['status']=='MATCHED')
+    ranking_point=_strict_point_gain(methods.get('delay_kernel_rank',{}),
+                                     methods.get('anchor_graph_delay_kernel',{}))
+    ranking_component_supported=(ranking_point
+        and delay_kernel_rank_vs_kernel['status']=='SUPPORTS_INCREMENTAL_GAIN'
+        and ranking_budget['status']=='MATCHED')
 
-    if full_contrast_supported or graph_contrast_supported:
+    if full_contrast_supported or graph_contrast_supported or ranking_component_supported:
         contrastive_verdict='PRELIMINARY_SIMULATOR_CONDITIONAL_CONTRASTIVE_GAIN'
     elif ((full_contrast_point and full_contrast_ci['status']=='SUPPORTS_INCREMENTAL_GAIN'
            and full_contrast_budget['status']!='MATCHED')
           or (graph_contrast_point and graph_contrast_ci['status']=='SUPPORTS_INCREMENTAL_GAIN'
               and graph_contrast_budget['status']!='MATCHED')):
         contrastive_verdict='CONTRASTIVE_GAIN_NOT_EQUAL_BUDGET_VERIFIED'
-    elif full_contrast_point or graph_contrast_point:
+    elif full_contrast_point or graph_contrast_point or ranking_point:
         contrastive_verdict='DESCRIPTIVE_CONTRASTIVE_GAIN_NOT_STATISTICALLY_RESOLVED'
     else:
         contrastive_verdict='CONTRASTIVE_GAIN_NOT_DEMONSTRATED'
@@ -307,16 +328,16 @@ def summarize(study_path, boundary_path=None, min_resolved=30,
 
     if needed:
         novelty='NOT_TESTABLE_WITH_CURRENT_EVIDENCE'
-    elif not graph_point_advantage and not event_point_advantage:
+    elif not graph_point_advantage and not event_point_advantage and not ranking_point:
         novelty='INCREMENTAL_GRAPH_AND_EVENT_GAIN_NOT_DEMONSTRATED'
-    elif graph_component_supported or event_component_supported:
+    elif graph_component_supported or event_component_supported or ranking_component_supported:
         novelty='PRELIMINARY_SIMULATOR_CONDITIONAL_COMPONENT_GAIN'
     elif ((graph_point_advantage and graph_vs_no_graph['status']=='SUPPORTS_INCREMENTAL_GAIN'
            and graph_budget['status']!='MATCHED')
           or (event_point_advantage and event_vs_no_event['status']=='SUPPORTS_INCREMENTAL_GAIN'
               and event_budget['status']!='MATCHED')):
         novelty='COMPONENT_GAIN_NOT_EQUAL_BUDGET_VERIFIED'
-    elif graph_point_advantage or event_point_advantage:
+    elif graph_point_advantage or event_point_advantage or ranking_point:
         novelty='DESCRIPTIVE_COMPONENT_GAIN_NOT_STATISTICALLY_RESOLVED'
     else:
         novelty='INCREMENTAL_GRAPH_AND_EVENT_GAIN_NOT_DEMONSTRATED'
@@ -372,15 +393,19 @@ def summarize(study_path, boundary_path=None, min_resolved=30,
                 'full_minus_equal_full_source_budget_no_events':event_vs_no_event,
                 'anchor_graph_event_local_minus_anchor_graph':event_local_vs_graph,
                 'anchor_graph_delay_kernel_minus_anchor_graph':delay_kernel_vs_graph,
+                'delay_kernel_rank_minus_delay_kernel':delay_kernel_rank_vs_kernel,
                 'graph_equal_budget_audit':graph_budget,
                 'event_equal_budget_audit':event_budget,
+                'ranking_equal_budget_audit':ranking_budget,
                 'graph_component_gain_supported':graph_component_supported,
                 'event_component_gain_supported':event_component_supported,
                 'graph_strictly_better_than_anchor_full_point_estimate':graph_point_advantage,
                 'graph_noninferior_with_strict_metric_gain_point_estimate':graph_point_noninferior,
                 'delay_kernel_noninferior_with_strict_metric_gain_point_estimate':delay_kernel_point_noninferior,
                 'event_local_noninferior_with_strict_metric_gain_point_estimate':event_local_point_noninferior,
-                'full_strictly_better_than_no_events_point_estimate':event_point_advantage},
+                'full_strictly_better_than_no_events_point_estimate':event_point_advantage,
+                'ranking_component_gain_supported':ranking_component_supported,
+                'ranking_point_gain':ranking_point},
             'contrastive_ablation':{
                 'full_contrast_minus_full':full_contrast_ci,
                 'anchor_graph_contrast_minus_anchor_graph':graph_contrast_ci,
@@ -388,6 +413,7 @@ def summarize(study_path, boundary_path=None, min_resolved=30,
                 'anchor_graph_contrast_equal_budget_audit':graph_contrast_budget,
                 'full_contrast_point_gain':full_contrast_point,
                 'anchor_graph_contrast_point_gain':graph_contrast_point,
+                'delay_kernel_rank_point_gain':ranking_point,
                 'verdict':contrastive_verdict},
             'empirical_boundary_screen':boundary,'model_rollout_effort_proxy':cost,
             'scientific_interpretation':[
@@ -395,6 +421,7 @@ def summarize(study_path, boundary_path=None, min_resolved=30,
                 'Component gains require concordant improvement in sign error, underresolution, critical miss, ego-safe decision regret, and verified equal training budgets',
                 'Critical ranking uses kinematically matched, reference-ego-safe candidate pairs; unknown route legality remains unverified',
                 'An event-feature claim requires full vs no_events at matched capacity',
+                'A ranking-loss claim requires a boundary-resolved downstream-union contrast, an independent delay-kernel control, and equal update/capacity metadata',
                 'A contrastive-loss claim requires full_contrast vs full or anchor_graph_contrast vs anchor_graph under equal optimizer updates and active capacity',
                 'WOMD history is observational and does not identify ego-action counterfactuals',
                 'Scene-wise bootstrap is not proof of external-model generalization; paired dependent edges require clustered uncertainty',

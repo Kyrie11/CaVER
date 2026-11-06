@@ -35,7 +35,7 @@ def _score_prediction(row, predicted, threshold, detection):
              'matched_ego_safe_legal_unknown':False,
              'critical':[], 'resolved':[], 'pair_errors':[], 'down_errors':[],
              'regret':None, 'pair_regrets':[], 'decision_abstain':None,
-             'event':[], 'pair_errors_near':[], 'pair_errors_far':[],
+             'event':[], 'downstream_events':[], 'pair_errors_near':[], 'pair_errors_far':[],
              'risk_reversal':False, 'ego_safe':False}
     if not ('early' in names and 'late' in names):
         return empty
@@ -124,6 +124,18 @@ def _score_prediction(row, predicted, threshold, detection):
 
     down_errors=[abs(float(predicted[f'{name}/down'])-float(aud[f'{name}/down']))
                  for name in names]
+    downstream_events=[]
+    if eligible and ego_safe:
+        down_true=float(aud['early/down'])-float(aud['late/down'])
+        down_est=float(predicted['early/down'])-float(predicted['late/down'])
+        if abs(down_true)>=threshold:
+            downstream_events.append({'scene_id':row.get('scene_id'),
+                'true_delta':down_true,'estimate':down_est,
+                'underresolution':float(abs(down_est)<detection),
+                'sign_error':float(abs(down_est)>=detection and down_est*down_true<0),
+                'critical_miss':float(abs(down_est)<detection or down_est*down_true<0),
+                'reference_sign_resolved':bool(abs(down_true)>radius),
+                'reference_mc_radius':radius})
     regret=None; pair_regrets=[]; decision_abstain=None
     if eligible and ego_safe:
         pred_safe=[name for name in (a,b) if float(predicted[f'{name}/ego'])<=.05]
@@ -148,6 +160,7 @@ def _score_prediction(row, predicted, threshold, detection):
             'reference_ego_risk_early':ego_early,
             'reference_ego_risk_late':ego_late,
             'critical':events,'resolved':[x for x in events if x['reference_sign_resolved']],
+            'downstream_events':downstream_events,
             'pair_errors':errors,'down_errors':down_errors,'regret':regret,
             'pair_regrets':pair_regrets,'decision_abstain':decision_abstain,
             'event':pairs,'pair_errors_near':near,'pair_errors_far':far,
@@ -164,6 +177,8 @@ def _score_prediction(row, predicted, threshold, detection):
 def _aggregate(rows):
     critical=[c for r in rows for c in r['critical']]
     resolved=[c for r in rows for c in r['resolved']]
+    downstream=[c for r in rows for c in r.get('downstream_events',[])]
+    downstream_resolved=[c for c in downstream if c['reference_sign_resolved']]
     errors=[x for r in rows for x in r['pair_errors']]
     reg=[r['regret'] for r in rows if r['regret'] is not None]
     pair_reg=[x for r in rows for x in r.get('pair_regrets',[])]
@@ -194,6 +209,14 @@ def _aggregate(rows):
         'reference_resolved_sign_error_rate':_avg([x['sign_error'] for x in resolved]),
         'critical_pair_underresolution_rate':_avg([x['underresolution'] for x in critical]),
         'critical_pair_miss_rate':_avg([x['critical_miss'] for x in critical]),
+        'downstream_union_sign_error_rate':_avg([x['sign_error'] for x in downstream]),
+        'downstream_union_underresolution_rate':_avg([x['underresolution'] for x in downstream]),
+        'downstream_union_miss_rate':_avg([x['critical_miss'] for x in downstream]),
+        'downstream_union_resolved_sign_error_rate':_avg([x['sign_error'] for x in downstream_resolved]),
+        'downstream_union_resolved_underresolution_rate':_avg([x['underresolution'] for x in downstream_resolved]),
+        'downstream_union_resolved_miss_rate':_avg([x['critical_miss'] for x in downstream_resolved]),
+        'downstream_union_contrast_n':len(downstream),
+        'downstream_union_resolved_n':len(downstream_resolved),
         'pair_reference_risk_mae':_avg(errors),
         'near_boundary_pair_risk_mae':_avg([x for r in rows for x in r['pair_errors_near']]),
         'far_boundary_pair_risk_mae':_avg([x for r in rows for x in r['pair_errors_far']]),
@@ -217,6 +240,9 @@ def _bootstrap(d1,d0,seed=51,n_boot=500):
     rng=np.random.default_rng(seed);n=len(d1)
     keys=('critical_pair_sign_error_rate','reference_resolved_sign_error_rate',
           'critical_pair_underresolution_rate','critical_pair_miss_rate',
+          'downstream_union_sign_error_rate','downstream_union_underresolution_rate',
+          'downstream_union_miss_rate','downstream_union_resolved_sign_error_rate',
+          'downstream_union_resolved_underresolution_rate','downstream_union_resolved_miss_rate',
           'matched_ego_safe_safety_ranking_regret','matched_ego_safe_pair_ranking_regret',
           'pair_reference_risk_mae','downstream_union_reference_risk_mae')
     samples={k:[] for k in keys}
@@ -279,7 +305,7 @@ def study(test_file,models,contrast=.20,detect=.05,bootstrap=2000,max_examples=8
         train_digest=(sha256('\\n'.join(train_ids).encode()).hexdigest() if train_ids else None)
         training_meta={key:model.meta.get(key) for key in (
             'epochs','optimizer_updates_per_epoch','optimizer_updates_total',
-            'active_parameter_count','total_parameter_count','seed','contrast_weight',
+            'active_parameter_count','total_parameter_count','seed','contrast_weight','rank_weight',
             'contrastive_scenes_per_epoch','contrastive_pairs_per_epoch','contrast_threshold')}
         training_meta['training_scene_set_sha256']=train_digest
         checksums[name]={'checkpoint_sha256':sha256(Path(checkpoint).read_bytes()).hexdigest(),
@@ -304,6 +330,8 @@ def study(test_file,models,contrast=.20,detect=.05,bootstrap=2000,max_examples=8
                         if 'anchor_graph_event_local' in details and 'anchor_graph' in details else {})
     paired_delay_kernel=(_bootstrap(details['anchor_graph_delay_kernel'],details['anchor_graph'],n_boot=bootstrap)
                          if 'anchor_graph_delay_kernel' in details and 'anchor_graph' in details else {})
+    paired_delay_kernel_rank=(_bootstrap(details['delay_kernel_rank'],details['anchor_graph_delay_kernel'],n_boot=bootstrap)
+                              if 'delay_kernel_rank' in details and 'anchor_graph_delay_kernel' in details else {})
     paired_full_contrast=(_bootstrap(details['full_contrast'],details['full'],n_boot=bootstrap)
                           if 'full_contrast' in details and 'full' in details else {})
     paired_graph_contrast=(_bootstrap(details['anchor_graph_contrast'],details['anchor_graph'],n_boot=bootstrap)
@@ -334,6 +362,7 @@ def study(test_file,models,contrast=.20,detect=.05,bootstrap=2000,max_examples=8
             'paired_scene_bootstrap_anchor_graph_minus_anchor_full':paired_graph,
             'paired_scene_bootstrap_anchor_graph_event_local_minus_anchor_graph':paired_event_local,
             'paired_scene_bootstrap_anchor_graph_delay_kernel_minus_anchor_graph':paired_delay_kernel,
+            'paired_scene_bootstrap_delay_kernel_rank_minus_delay_kernel':paired_delay_kernel_rank,
             'paired_scene_bootstrap_full_contrast_minus_full':paired_full_contrast,
             'paired_scene_bootstrap_anchor_graph_contrast_minus_anchor_graph':paired_graph_contrast,
             'source_worlds_per_candidate':records[0].get('source_worlds'),
