@@ -34,6 +34,13 @@ GRAPH_EPOCHS="${GRAPH_EPOCHS:-$EPOCHS}"
 BOOTSTRAP="${BOOTSTRAP:-2000}"
 CONTRAST_WEIGHT="${CONTRAST_WEIGHT:-0.10}"
 RANK_WEIGHT="${RANK_WEIGHT:-0.10}"
+BASE_RANK_WEIGHT="${BASE_RANK_WEIGHT:-0.0}"
+RANK_CONTROL_WEIGHT="${RANK_CONTROL_WEIGHT:-0.0}"
+RANK_TREATMENT_WEIGHT="${RANK_TREATMENT_WEIGHT:-$RANK_WEIGHT}"
+CONTRAST_THRESHOLD="${CONTRAST_THRESHOLD:-0.20}"
+RANK_THRESHOLD="${RANK_THRESHOLD:-$CONTRAST_THRESHOLD}"
+RANKING_DETECT="${RANKING_DETECT:-0.01}"
+REFERENCE_ALPHA="${REFERENCE_ALPHA:-0.05}"
 SEED="${SEED:-11}"
 if [[ "${ALLOW_UNMATCHED_EPOCHS:-0}" != "1" && "$GRAPH_EPOCHS" != "$EPOCHS" ]];then
   echo "ERROR: anchor_full and anchor_graph must use the same optimizer updates; set GRAPH_EPOCHS=EPOCHS or ALLOW_UNMATCHED_EPOCHS=1." >&2
@@ -52,15 +59,19 @@ else
   DEVICE=auto
 fi
 train_one() {
-  local variant=$1 name=$2 weight=$3 epochs=$4 gpu=$5
+  local variant=$1 name=$2 weight=$3 epochs=$4 gpu=$5 rank_weight=${6:-$BASE_RANK_WEIGHT}
   if [[ "$GPU_COUNT" -ge 2 ]];then
     CUDA_VISIBLE_DEVICES="$gpu" python -m caver.cli train-cbc --input "$TRAIN" \
        --variant "$variant" --epochs "$epochs" --device "$DEVICE" \
-       --contrast-weight "$weight" --rank-weight "$RANK_WEIGHT" --seed "$SEED" --output "$OUT/cbc_${name}.pt" \
+       --contrast-weight "$weight" --rank-weight "$rank_weight" \
+       --contrast-threshold "$CONTRAST_THRESHOLD" --rank-threshold "$RANK_THRESHOLD" \
+       --reference-alpha "$REFERENCE_ALPHA" --seed "$SEED" --output "$OUT/cbc_${name}.pt" \
        >"$OUT/train_${name}.log" 2>&1
   else
     python -m caver.cli train-cbc --input "$TRAIN" --variant "$variant" \
-       --epochs "$epochs" --device "$DEVICE" --contrast-weight "$weight" --rank-weight "$RANK_WEIGHT" --seed "$SEED" \
+       --epochs "$epochs" --device "$DEVICE" --contrast-weight "$weight" --rank-weight "$rank_weight" \
+       --contrast-threshold "$CONTRAST_THRESHOLD" --rank-threshold "$RANK_THRESHOLD" \
+       --reference-alpha "$REFERENCE_ALPHA" --seed "$SEED" \
        --output "$OUT/cbc_${name}.pt" >"$OUT/train_${name}.log" 2>&1
   fi
 }
@@ -82,13 +93,28 @@ train_pair full full 0 "$EPOCHS" no_events no_events 0 "$EPOCHS"
 train_pair anchor_full anchor_full 0 "$EPOCHS" anchor_graph anchor_graph 0 "$GRAPH_EPOCHS"
 train_pair anchor_graph anchor_graph_contrast "$CONTRAST_WEIGHT" "$GRAPH_EPOCHS" \
            full full_contrast "$CONTRAST_WEIGHT" "$EPOCHS"
+# Delay-kernel rank ablation.  Both checkpoints use the same variant,
+# records, seed, updates, and contrast weight.  Only the scene-level ranking
+# term differs, which makes a downstream ranking gain attributable to that
+# term rather than to a graph or capacity change.
+if [[ "$GPU_COUNT" -ge 2 ]];then
+  train_one anchor_graph_delay_kernel anchor_graph_delay_kernel 0 "$GRAPH_EPOCHS" 0 "$RANK_CONTROL_WEIGHT" & p0=$!
+  train_one anchor_graph_delay_kernel delay_kernel_rank 0 "$GRAPH_EPOCHS" 1 "$RANK_TREATMENT_WEIGHT" & p1=$!
+  fail=0; wait "$p0" || fail=1; wait "$p1" || fail=1
+  if [[ "$fail" != 0 ]];then echo 'A CUDA ranking ablation failed - see train_*.log' >&2;exit 1;fi
+else
+  train_one anchor_graph_delay_kernel anchor_graph_delay_kernel 0 "$GRAPH_EPOCHS" 0 "$RANK_CONTROL_WEIGHT"
+  train_one anchor_graph_delay_kernel delay_kernel_rank 0 "$GRAPH_EPOCHS" 0 "$RANK_TREATMENT_WEIGHT"
+fi
 python -m caver.cli cbc-study --input "$TEST" \
   --model "full=$OUT/cbc_full.pt" --model "no_events=$OUT/cbc_no_events.pt" \
   --model "anchor_full=$OUT/cbc_anchor_full.pt" \
   --model "anchor_graph=$OUT/cbc_anchor_graph.pt" \
   --model "anchor_graph_contrast=$OUT/cbc_anchor_graph_contrast.pt" \
   --model "full_contrast=$OUT/cbc_full_contrast.pt" \
-  --contrast .20 --detect .05 --bootstrap "$BOOTSTRAP" \
+  --model "anchor_graph_delay_kernel=$OUT/cbc_anchor_graph_delay_kernel.pt" \
+  --model "delay_kernel_rank=$OUT/cbc_delay_kernel_rank.pt" \
+  --contrast .20 --detect .05 --ranking-contrast "$RANK_THRESHOLD" --ranking-detect "$RANKING_DETECT" --bootstrap "$BOOTSTRAP" \
   --output "$OUT/cbc_study.json" >/dev/null
 python -m caver.cli cbc-boundary-study --development "$DEV" --test "$TEST" \
  --output "$OUT/cbc_boundary_study.json" >/dev/null

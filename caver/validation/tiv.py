@@ -29,6 +29,7 @@ SOURCE_INFO={
     'full_candidate_reprediction':{'removes':'anchor reuse and local approximation error','cannot_remove':'base response law bias'},
     'independent_late_brake':{'removes':'some response structural disagreement','cannot_remove':'common missing driver regimes'},
     'independent_conservative':{'removes':'some response structural disagreement','cannot_remove':'common missing driver regimes'},
+    'independent_reference':{'removes':'a declared reference-family disagreement','cannot_remove':'all response-law misspecification'},
     'physics_envelope':{'removes':'uncertainty inside known bounded dynamics','cannot_remove':'unmodeled drivers or discontinuities'},
     'fresh_observation':{'removes':'latent driver-response uncertainty under a safe holding prefix','cannot_remove':'late observations / irreversible hazards'}
 }
@@ -65,7 +66,8 @@ def propose(decision,pred,actions,pairs,budget=12,deadline_ms=100.,time_now=0.):
     q=[]
     for source,samples,cost,latency in [
        ('more_source_samples',8,8.,18.),('full_candidate_reprediction',4,9.,40.),
-       ('independent_late_brake',4,10.,65.),('independent_conservative',4,10.,68.)]:
+       ('independent_late_brake',4,10.,65.),('independent_conservative',4,10.,68.),
+       ('independent_reference',4,10.,72.)]:
         if cost<=budget and latency<=deadline_ms:
             q.append(Query(cand,tuple(active),chain,(time_now,max(time_now+1.,time_now+4.)),source,samples,cost,latency))
     return q
@@ -79,9 +81,37 @@ TIV_FEATURE_SCHEMA=(
 
 
 class VerificationValueHead(nn.Module):
+    """Predict a signed query value and an uncertainty scale.
+
+    The mean is retained as the default forward output for API compatibility.
+    Selection uses the lower confidence value returned by
+    :meth:`predict_distribution`, so a noisy positive mean cannot authorize an
+    acquisition by itself.
+    """
     def __init__(self,input_dim=len(TIV_FEATURE_SCHEMA)):
         super().__init__();self.input_dim=int(input_dim)
-        self.net=nn.Sequential(nn.Linear(self.input_dim,64),nn.SiLU(),nn.Linear(64,64),nn.SiLU(),nn.Linear(64,1))
+        self.backbone=nn.Sequential(nn.Linear(self.input_dim,64),nn.SiLU(),
+                                    nn.Linear(64,64),nn.SiLU())
+        self.mean_head=nn.Linear(64,1)
+        self.log_scale_head=nn.Linear(64,1)
+
+    def predict_distribution(self,x):
+        h=self.backbone(x)
+        mean=self.mean_head(h).squeeze(-1)
+        scale=torch.nn.functional.softplus(self.log_scale_head(h)).squeeze(-1)+1e-3
+        return mean,scale
+
+    def forward(self,x):
+        return self.predict_distribution(x)[0]
+
+
+class _LegacyVerificationValueHead(nn.Module):
+    """Loader-only adapter for the original single-output value head."""
+    def __init__(self,input_dim=len(TIV_FEATURE_SCHEMA)):
+        super().__init__();self.input_dim=int(input_dim)
+        self.net=nn.Sequential(nn.Linear(self.input_dim,64),nn.SiLU(),
+                               nn.Linear(64,64),nn.SiLU(),nn.Linear(64,1))
+
     def forward(self,x):return self.net(x).squeeze(-1)
 
 def query_features(decision,pred,q):
@@ -94,7 +124,7 @@ def query_features(decision,pred,q):
     regrets=[float(decision.worst_regret.get(a,5.)) for a in q.candidates]
     down=[float(pred.get(f'{a}/down',1.)) for a in q.candidates]
     src=['more_source_samples','full_candidate_reprediction','independent_late_brake','independent_conservative',
-         'physics_envelope','fresh_observation'].index(q.source)
+         'independent_reference','physics_envelope','fresh_observation'].index(q.source)
     return np.asarray([max(pp,default=1.),min(pp,default=1.),
                        max(pp,default=1.)-min(pp,default=1.),
                        min(mar,default=1.),min(ego,default=1.),max(inc,default=1.),
@@ -113,11 +143,18 @@ def learn_query_value(rows,output,epochs=120):
     X=torch.tensor(np.asarray([r['features'] for r in rows],np.float32));Y=torch.tensor(np.asarray([r['signed_value'] for r in rows],np.float32))
     m=VerificationValueHead();opt=torch.optim.Adam(m.parameters(),lr=8e-4)
     for ep in range(epochs):
-        pred=m(X);loss=torch.nn.functional.smooth_l1_loss(pred,Y)
+        pred,scale=m.predict_distribution(X)
+        residual=Y-pred
+        # The robust regression term fits signed value.  The small scale term
+        # discourages a degenerate uncertainty estimate while allowing the
+        # head to express heteroscedastic query outcomes.
+        loss=torch.nn.functional.smooth_l1_loss(pred,Y)+.02*torch.mean(
+            torch.abs(residual)/scale+torch.log(scale))
         opt.zero_grad();loss.backward();opt.step()
     Path(output).parent.mkdir(parents=True,exist_ok=True)
     torch.save({'weights':m.state_dict(),'data_scope':'OFFLINE_SIMULATED_SOURCE_AUDIT','n':len(rows),
-                'feature_schema':list(TIV_FEATURE_SCHEMA)},output)
+                'feature_schema':list(TIV_FEATURE_SCHEMA),
+                'head_type':'probabilistic_value_v1'},output)
     return {'n':len(rows),'training_loss':float(loss.detach()),'output':str(output),
             'feature_schema':list(TIV_FEATURE_SCHEMA)}
 
@@ -128,7 +165,8 @@ def verify_source(scene,actions,q,seed=100):
     from caver.sim.traffic import sample_world,rollout
     start=time.perf_counter()
     fam={'more_source_samples':'delayed_idm','full_candidate_reprediction':'delayed_idm',
-         'independent_late_brake':'late_brake','independent_conservative':'conservative'}
+         'independent_late_brake':'late_brake','independent_conservative':'conservative',
+         'independent_reference':'stress_reference'}
     if q.source not in fam:
         return {'source':q.source,'status':'NOT_IMPLEMENTED_FOR_SCENE','can_recertify':False,
                 'reason':'Requires independent physics envelope or real new observation'}
@@ -143,13 +181,13 @@ def verify_source(scene,actions,q,seed=100):
     measured_ms=(time.perf_counter()-start)*1000.
     return {'source':q.source,'status':'SIMULATED_QUERY','can_recertify':False,'outcomes':outs,
             'measured_walltime_ms':measured_ms,'presumed_latency_ms':q.presumed_latency_ms,
-            'source_independent_of_original_model':q.source in ('independent_late_brake','independent_conservative'),
+            'source_independent_of_original_model':q.source in ('independent_late_brake','independent_conservative','independent_reference'),
             'structurally_independent_of_all_synthetic_reactors':False,
             'warning':'Query changes evidence transcript; final acceptance requires independent release-state calibration'}
 
 
 def select_query(decision, pred, candidates, value_head=None, budget=12., deadline_ms=100.,
-                 holding_prefix_verified=False, protocol_frozen=True):
+                 holding_prefix_verified=False, protocol_frozen=True, value_kappa=1.64):
     """One-shot adaptive query choice BEFORE terminal certification.
 
     A learned value head predicts signed execution-loss improvement; it NEVER
@@ -170,12 +208,21 @@ def select_query(decision, pred, candidates, value_head=None, budget=12., deadli
     with torch.no_grad():
         for q in allowed:
             features=torch.tensor(query_features(decision,pred,q)[None,:])
-            score=float(value_head(features)[0].item())
-            scores.append((score,q))
-    score,q=max(scores,key=lambda x:x[0])
-    if not np.isfinite(score) or score<=0:
-        return {'query':None,'reason':'nonpositive predicted signed VOI','best_value':score}
-    return {'query':q,'predicted_signed_value':score,
+            if hasattr(value_head,'predict_distribution'):
+                mean,scale=value_head.predict_distribution(features)
+                mean=float(mean[0].item());scale=float(scale[0].item())
+            else:
+                mean=float(value_head(features)[0].item());scale=0.
+            lcb=mean-float(value_kappa)*scale
+            scores.append((lcb,mean,scale,q))
+    lcb,mean,scale,q=max(scores,key=lambda x:x[0])
+    if not np.isfinite(lcb) or lcb<=0:
+        return {'query':None,'reason':'nonpositive lower-confidence signed VOI',
+                'best_value_lcb':lcb,'best_value_mean':mean,
+                'best_value_scale':scale,'value_kappa':float(value_kappa)}
+    return {'query':q,'predicted_signed_value':mean,
+            'predicted_value_lcb':lcb,'predicted_value_scale':scale,
+            'value_kappa':float(value_kappa),
             'not_a_safety_certificate':True,'must_recalibrate_after_query':True}
 
 
@@ -186,7 +233,11 @@ def load_query_value(path):
         raise ValueError('Unrecognized TIV acquisition model provenance')
     weight=data['weights'].get('net.0.weight')
     input_dim=int(weight.shape[1]) if weight is not None else len(TIV_FEATURE_SCHEMA)
-    m=VerificationValueHead(input_dim=input_dim);m.load_state_dict(data['weights']);m.eval()
+    if any(key.startswith('net.') for key in data['weights']):
+        m=_LegacyVerificationValueHead(input_dim=input_dim)
+    else:
+        m=VerificationValueHead(input_dim=input_dim)
+    m.load_state_dict(data['weights']);m.eval()
     return m
 
 
@@ -204,7 +255,13 @@ def audit_query_value(rows, value_head=None):
     X=torch.tensor(np.asarray([r['features'] for r in rows],np.float32))
     y=np.asarray([float(r['signed_value']) for r in rows],dtype=float)
     with torch.no_grad():
-        pred=value_head(X).cpu().numpy().astype(float)
+        if hasattr(value_head,'predict_distribution'):
+            pred_t,scale_t=value_head.predict_distribution(X)
+            pred=pred_t.cpu().numpy().astype(float)
+            scale=scale_t.cpu().numpy().astype(float)
+        else:
+            pred=value_head(X).cpu().numpy().astype(float)
+            scale=None
     if not np.all(np.isfinite(pred)) or not np.all(np.isfinite(y)):
         return {'status':'INVALID','n':len(rows),'reason':'nonfinite value prediction or label'}
     mae=float(np.mean(np.abs(pred-y)))
@@ -221,7 +278,7 @@ def audit_query_value(rows, value_head=None):
     for idx in groups.values():
         if len(idx)<2:continue
         top1.append(float(idx[int(np.argmax(pred[idx]))]==idx[int(np.argmax(y[idx]))]))
-    return {'status':'MEASURED','n':len(rows),'scene_groups':len(groups),
+    report={'status':'MEASURED','n':len(rows),'scene_groups':len(groups),
             'signed_value_mae':mae,'signed_value_rmse':rmse,
             'signed_value_pearson':corr,
             'actual_positive_rate':float(np.mean(y>0.)),
@@ -229,3 +286,7 @@ def audit_query_value(rows, value_head=None):
             'scene_top1_best_source_rate':float(np.mean(top1)) if top1 else None,
             'label_scope':'SIMULATOR_CONDITIONAL_OFFLINE_QUERY_AUDIT',
             'query_is_certificate':False}
+    if scale is not None:
+        report['predicted_scale_mean']=float(np.mean(scale))
+        report['lower_confidence_positive_rate']=float(np.mean(pred-1.64*scale>0.))
+    return report

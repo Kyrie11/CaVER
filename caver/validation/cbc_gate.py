@@ -104,6 +104,64 @@ def _noninferior_point_gain(method, control):
     return bool(values) and strict and all(values)
 
 
+def _ranking_sensitivity(report, min_resolved=1):
+    """Summarize the lower-threshold ranking ablation separately.
+
+    The primary CBC gate uses the declared critical contrast. A development
+    ranking threshold can expose directional supervision, but it must not
+    replace the critical denominator. This report is intentionally isolated
+    from the primary verdict.
+    """
+    methods=report.get('ranking_methods',{})
+    control=methods.get('anchor_graph_delay_kernel',{})
+    treatment=methods.get('delay_kernel_rank',{})
+    comparison=report.get('paired_scene_bootstrap_ranking_delay_kernel_rank_minus_delay_kernel',{})
+    if not control or not treatment or not comparison:
+        return {'status':'NOT_MEASURED',
+                'reason':'ranking sensitivity report or paired comparison is missing'}
+    resolved=max(int(treatment.get('critical_pair_ref_sign_resolved') or 0),
+                 int(treatment.get('downstream_union_resolved_n') or 0))
+    if resolved < int(min_resolved):
+        return {'status':'NOT_MEASURED',
+                'reason':'no finite-reference-resolved ranking pairs',
+                'resolved_pairs':resolved}
+    metrics=('matched_ego_safe_safety_ranking_regret',
+             'matched_ego_safe_pair_ranking_regret',
+             'downstream_union_reference_risk_mae')
+    point={}
+    strict=False
+    for metric in metrics:
+        m=_number(treatment.get(metric)); c=_number(control.get(metric))
+        if m is None or c is None:
+            continue
+        point[metric]={'treatment':m,'control':c,'delta':m-c}
+        strict = strict or m < c
+        if m > c:
+            return {'status':'NO_RANKING_GAIN', 'resolved_pairs':resolved,
+                    'point_comparison':point,
+                    'reason':'the treatment is worse on at least one available ranking metric'}
+    if not point:
+        return {'status':'NOT_MEASURED','resolved_pairs':resolved,
+                'reason':'ranking metrics are unavailable'}
+    ci={}
+    for metric in metrics:
+        record=comparison.get(metric,{})
+        interval=record.get('bootstrap_95pct_ci')
+        if isinstance(interval,(list,tuple)) and len(interval)==2:
+            lo,hi=_number(interval[0]),_number(interval[1])
+            if lo is not None and hi is not None:
+                ci[metric]={'delta':_number(record.get('delta_method_minus_source')),
+                            'bootstrap_95pct_ci':[lo,hi]}
+    strict_ci=any(v['bootstrap_95pct_ci'][1] < 0. for v in ci.values())
+    return {'status':'PRELIMINARY_RANKING_GAIN' if strict and strict_ci else
+            'RANKING_GAIN_NOT_STATISTICALLY_RESOLVED',
+            'resolved_pairs':resolved,'point_comparison':point,
+            'paired_confidence_intervals':ci,
+            'threshold':report.get('ranking_pair_abs_delta_threshold'),
+            'detection_threshold':report.get('ranking_predicted_detection_threshold'),
+            'critical_gate_unchanged':True}
+
+
 def _equal_budget_audit(report, method_name, control_name, parameter_tolerance=.01,
                         contrast_weight_mode='equal', rank_weight_mode='equal'):
     """Verify same training data/seed/updates and near-equal active parameters."""
@@ -142,6 +200,31 @@ def _equal_budget_audit(report, method_name, control_name, parameter_tolerance=.
     contrast_threshold_equal=math.isclose(float(method['contrast_threshold']),
                                            float(control['contrast_threshold']),
                                            rel_tol=0.,abs_tol=1e-12)
+    # New checkpoints record the independent ranking threshold and the
+    # finite-MC filtering confidence.  Keep old reports loadable while
+    # requiring equality whenever both values are available.
+    rank_threshold_equal=(
+        math.isclose(float(method['rank_threshold']),float(control['rank_threshold']),
+                     rel_tol=0.,abs_tol=1e-12)
+        if method.get('rank_threshold') is not None and control.get('rank_threshold') is not None
+        else True)
+    reference_alpha_equal=(
+        math.isclose(float(method['reference_alpha']),float(control['reference_alpha']),
+                     rel_tol=0.,abs_tol=1e-12)
+        if method.get('reference_alpha') is not None and control.get('reference_alpha') is not None
+        else True)
+    ranking_scene_count_equal=(
+        int(method['ranking_scenes_per_epoch'])==int(control['ranking_scenes_per_epoch'])
+        if method.get('ranking_scenes_per_epoch') is not None and control.get('ranking_scenes_per_epoch') is not None
+        else True)
+    ranking_pair_count_equal=(
+        int(method['ranking_pairs_per_epoch'])==int(control['ranking_pairs_per_epoch'])
+        if method.get('ranking_pairs_per_epoch') is not None and control.get('ranking_pairs_per_epoch') is not None
+        else True)
+    arrival_kernel_shift_equal=(
+        bool(method['candidate_arrival_kernel_shift'])==bool(control['candidate_arrival_kernel_shift'])
+        if method.get('candidate_arrival_kernel_shift') is not None and control.get('candidate_arrival_kernel_shift') is not None
+        else True)
     split_equal=(method['training_scene_set_sha256']==control['training_scene_set_sha256'])
     p_method=float(method['active_parameter_count'])
     p_control=float(control['active_parameter_count'])
@@ -158,6 +241,11 @@ def _equal_budget_audit(report, method_name, control_name, parameter_tolerance=.
             'contrastive_scene_count_equal':contrast_scenes_equal,
             'contrastive_pair_count_equal':contrast_pairs_equal,
             'contrast_threshold_equal':contrast_threshold_equal,
+            'rank_threshold_equal':rank_threshold_equal,
+            'reference_alpha_equal':reference_alpha_equal,
+            'ranking_scene_count_equal':ranking_scene_count_equal,
+            'ranking_pair_count_equal':ranking_pair_count_equal,
+            'candidate_arrival_kernel_shift_equal':arrival_kernel_shift_equal,
             'training_scene_set_equal':split_equal,
             'rank_weight_mode_satisfied':rank_weight_ok}
     checks['contrast_weight_mode_satisfied']=contrast_weight_ok
@@ -297,6 +385,7 @@ def summarize(study_path, boundary_path=None, min_resolved=30,
     ranking_component_supported=(ranking_point
         and delay_kernel_rank_vs_kernel['status']=='SUPPORTS_INCREMENTAL_GAIN'
         and ranking_budget['status']=='MATCHED')
+    ranking_sensitivity=_ranking_sensitivity(report)
 
     if full_contrast_supported or graph_contrast_supported or ranking_component_supported:
         contrastive_verdict='PRELIMINARY_SIMULATOR_CONDITIONAL_CONTRASTIVE_GAIN'
@@ -405,7 +494,8 @@ def summarize(study_path, boundary_path=None, min_resolved=30,
                 'event_local_noninferior_with_strict_metric_gain_point_estimate':event_local_point_noninferior,
                 'full_strictly_better_than_no_events_point_estimate':event_point_advantage,
                 'ranking_component_gain_supported':ranking_component_supported,
-                'ranking_point_gain':ranking_point},
+                'ranking_point_gain':ranking_point,
+                'ranking_sensitivity':ranking_sensitivity},
             'contrastive_ablation':{
                 'full_contrast_minus_full':full_contrast_ci,
                 'anchor_graph_contrast_minus_anchor_graph':graph_contrast_ci,

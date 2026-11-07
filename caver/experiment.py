@@ -391,12 +391,16 @@ def _ranking_reference_target(row, contrast_threshold=.20, alpha=.05):
     return float(delta) if abs(delta)>radius else None
 
 
-def fit_cbc(records,output,epochs=75,seed=11,variant='full',device='auto',contrast_weight=0.,rank_weight=0.):
+def fit_cbc(records,output,epochs=75,seed=11,variant='full',device='auto',contrast_weight=0.,rank_weight=0.,
+            contrast_threshold=.20,rank_threshold=None,reference_alpha=.05):
     """Train every CBC variant with an identical optimizer-update schedule.
 
     Every (scene, action) group contributes exactly one optimizer update.
     The optional resolved-critical contrastive objective is added to the
     corresponding ``late`` group update rather than creating extra steps.
+    ``contrast_threshold`` and ``rank_threshold`` are independent predeclared
+    filters on simulator-conditional labels.  Each must exceed the finite
+    Monte-Carlo resolution radius for a row to enter its objective.
     """
     torch.manual_seed(seed)
     if device=='auto':device='cuda:0' if torch.cuda.is_available() else 'cpu'
@@ -404,6 +408,9 @@ def fit_cbc(records,output,epochs=75,seed=11,variant='full',device='auto',contra
         raise ValueError('CUDA requested but torch.cuda.is_available() is false; install an appropriate CUDA PyTorch wheel')
     dev=torch.device(device)
     if contrast_weight<0 or rank_weight<0:raise ValueError('loss weights must be nonnegative')
+    if rank_threshold is None:rank_threshold=contrast_threshold
+    if not (0.<contrast_threshold<1. and 0.<rank_threshold<1. and 0.<reference_alpha<1.):
+        raise ValueError('contrast/rank thresholds and reference alpha must lie in (0,1)')
     if epochs<1:raise ValueError('epochs must be positive')
     records=list(records)
     if any(r.get('experimental_split') not in ('train',None) for r in records):
@@ -415,6 +422,10 @@ def fit_cbc(records,output,epochs=75,seed=11,variant='full',device='auto',contra
     contrastive_data={}
     ranking_data={}
     example_count=0
+    arrival_kernel_shift_used=bool(uses_anchor and any(
+        any('candidate_arrival_shift' in graph
+            for graph in row.get('anchor_view',{}).get('candidate_temporal',{}).values())
+        for row in records))
     for row_index,row in enumerate(records):
         pairs=row['pairs']
         if uses_anchor and 'anchor_view' not in row:
@@ -449,7 +460,8 @@ def fit_cbc(records,output,epochs=75,seed=11,variant='full',device='auto',contra
 
         # Precompute the eligible contrastive supervision once. The same
         # scene/pair mask is used by full, no_events, graph and anchor variants.
-        contrast_mask=_contrastive_reference_mask(row,contrast_threshold=.20,alpha=.05)
+        contrast_mask=_contrastive_reference_mask(row,contrast_threshold=contrast_threshold,
+                                                  alpha=reference_alpha)
         if contrast_mask is not None and 'early' in action_features and 'late' in action_features:
             target=torch.tensor([
                 row['audited']['early/'+pair]-row['audited']['late/'+pair]
@@ -460,7 +472,8 @@ def fit_cbc(records,output,epochs=75,seed=11,variant='full',device='auto',contra
                 'traces':{'early':action_traces['early'],'late':action_traces['late']},
                 'pairs':pairs,'target':target,'mask':torch.as_tensor(contrast_mask,dtype=torch.bool)
             }
-        ranking_target=_ranking_reference_target(row,contrast_threshold=.20,alpha=.05)
+        ranking_target=_ranking_reference_target(row,contrast_threshold=rank_threshold,
+                                                 alpha=reference_alpha)
         if ranking_target is not None and 'early' in action_features and 'late' in action_features:
             ranking_data[row_index]=float(ranking_target)
 
@@ -492,6 +505,7 @@ def fit_cbc(records,output,epochs=75,seed=11,variant='full',device='auto',contra
     opt=torch.optim.AdamW(active_parameters,lr=1e-3,weight_decay=1e-4)
     updates_per_epoch=len(training_groups)
     contrastive_pair_count=sum(int(v['mask'].sum()) for v in contrastive_data.values())
+    ranking_pair_count=len(ranking_data)
     optimizer_updates=0
     losses=[]
 
@@ -568,12 +582,16 @@ def fit_cbc(records,output,epochs=75,seed=11,variant='full',device='auto',contra
                    'optimizer_updates_total':optimizer_updates,
                    'contrastive_scenes_per_epoch':len(contrastive_data),
                    'contrastive_pairs_per_epoch':contrastive_pair_count,
-                   'contrast_threshold':.20,'rank_weight':rank_weight,
+                   'contrast_threshold':contrast_threshold,
+                   'rank_threshold':rank_threshold,
+                   'reference_alpha':reference_alpha,'rank_weight':rank_weight,
                    'ranking_scenes_per_epoch':len(ranking_data),
+                   'ranking_pairs_per_epoch':ranking_pair_count,
                    'active_parameter_count':active_parameter_count,
                    'total_parameter_count':total_parameter_count,
                    'graph_channels':16 if uses_graph else None,
                    'graph_conditioned_joint':bool(uses_graph),
+                   'candidate_arrival_kernel_shift':arrival_kernel_shift_used,
                    'train_source':'simulator_reference','variant':variant,'seed':seed,
                    'epochs':epochs,'slack_masked':True,'training_device':str(dev),
                    'contrast_weight':contrast_weight,
@@ -589,7 +607,10 @@ def fit_cbc(records,output,epochs=75,seed=11,variant='full',device='auto',contra
             'contrastive_scenes_per_epoch':len(contrastive_data),
              'contrastive_pairs_per_epoch':contrastive_pair_count,
              'rank_weight':rank_weight,'ranking_scenes_per_epoch':len(ranking_data),
-            'contrast_threshold':.20,
+             'ranking_pairs_per_epoch':ranking_pair_count,
+            'contrast_threshold':contrast_threshold,'rank_threshold':rank_threshold,
+            'reference_alpha':reference_alpha,
+            'candidate_arrival_kernel_shift':arrival_kernel_shift_used,
             'active_parameter_count':active_parameter_count,
             'total_parameter_count':total_parameter_count}
 

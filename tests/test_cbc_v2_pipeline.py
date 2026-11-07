@@ -88,6 +88,28 @@ def test_delayed_graph_does_not_propagate_future_into_past():
         net(a,[[0,1,0]])
 
 
+def test_anchor_delay_kernel_shifts_only_ego_originating_edge():
+    from caver.models.anchor import _candidate_arrival_kernel_shift
+    # The anchor ego enters the receiver corridor at t=1, while the
+    # candidate enters at t=2.  A one-step lag kernel therefore shifts by one
+    # sample interval.  A non-ego edge is copied unchanged.
+    graph={'edges':[[0,1,1],[2,1,1]],
+           'edge_kernels':[[[1,.25],[2,.75]],[[1,1.]]]} 
+    anchor=np.zeros((4,3,6),dtype=float)
+    anchor[:,0,0]=[0.,10.,20.,30.]
+    anchor[:,1,0]=20.
+    anchor[:,2,0]=-50.
+    candidate_ego=np.zeros((4,2),dtype=float)
+    candidate_ego[:,0]=[0.,0.,0.,10.]
+    receiver=[anchor[:,i,:2].copy() for i in range(3)]
+    receiver[1][:,0]=20.
+    shifted,meta=_candidate_arrival_kernel_shift(graph,anchor,0,candidate_ego,receiver,.4)
+    assert meta['status']=='APPLIED'
+    assert meta['edges']['0']['status']=='SHIFTED'
+    assert shifted[0]==[[3,.25],[4,.75]]
+    assert shifted[1]==[[1,1.]]
+
+
 def test_cbc_study_has_small_bounded_output_and_rejects_non_test(tmp_path):
     rows=[]
     from caver.experiment import store_records

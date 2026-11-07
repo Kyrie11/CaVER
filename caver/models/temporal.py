@@ -62,14 +62,27 @@ def source_temporal_graph(scene, rollouts, dt_sample=.4):
     edges=[]
     edge_kernels=[]
     arrival_quantiles={}
+    # A static t=0 test can silently drop an ego-to-mediator edge when the
+    # ego enters the receiver's lane later in the source rollout.  Screen
+    # the complete source-predicted horizon while keeping the same coarse
+    # reachability envelope.  This is still a heuristic, not a physical
+    # reachability proof.
+    trajectory_arrays=[np.asarray(r['trajectory'],dtype=float) for r in rollouts]
+    if len({arr.shape[0] for arr in trajectory_arrays})!=1:
+        raise ValueError('Source rollout horizons must match for temporal graph')
+    source_traces=np.stack(trajectory_arrays,axis=0)
+    if source_traces.ndim!=4 or source_traces.shape[-1]!=6:
+        raise ValueError('Invalid source rollout stack for edge screen')
     for i,send in enumerate(scene.agents):
         for j,recv in enumerate(scene.agents):
             if i==j or recv.agent_id==scene.ego_id:continue
-            dx=send.x-recv.x
-            dy=send.y-recv.y
-            # A source agent can influence a physically reachable follower;
-            # include ego even if an initial lane-change is required.
-            if -10. <= dx <= 125. and abs(dy) <= 9.:
+            dx=source_traces[:,:,i,0]-source_traces[:,:,j,0]
+            dy=source_traces[:,:,i,1]-source_traces[:,:,j,1]
+            # A source agent can influence a physically reachable follower at
+            # any source-predicted time. Include ego even if an initial
+            # lane-change is required.
+            reachable=np.any((dx>=-10.) & (dx<=125.) & (np.abs(dy)<=9.))
+            if reachable:
                 receiver_delays=np.asarray([
                     r.get('driver_delay_s',{}).get(recv.agent_id,delay_mean[recv.agent_id])
                     for r in rollouts],dtype=float)
@@ -89,7 +102,7 @@ def source_temporal_graph(scene, rollouts, dt_sample=.4):
             'edges':edges,'edge_kernels':edge_kernels,
             'arrival_quantiles_s':arrival_quantiles,
             'sample_dt':float(dt_sample),'source_only':True,
-            'edge_screen':'INITIAL_REACHABILITY_HEURISTIC_NOT_PHYSICAL_COMPLETENESS',
+            'edge_screen':'SOURCE_TRAJECTORY_REACHABILITY_HEURISTIC_NOT_PHYSICAL_COMPLETENESS',
             'latency_accounting':{
                 'behavior_delay_in_source_rollout':True,
                 'driver_delay_channel_is_descriptive':True,

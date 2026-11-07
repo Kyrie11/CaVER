@@ -260,10 +260,11 @@ def _bootstrap(d1,d0,seed=51,n_boot=500):
             for k,v in samples.items() if v}
 
 
-def study(test_file,models,contrast=.20,detect=.05,bootstrap=2000,max_examples=8):
+def study(test_file,models,contrast=.20,detect=.05,bootstrap=2000,max_examples=8,
+          ranking_contrast=.05,ranking_detect=.01):
     """models: {label: checkpoint path}; reserves 'source' untrained baseline."""
-    if not 0<detect<contrast<1 or bootstrap<0:
-        raise ValueError('Invalid contrast/detection/bootstrap')
+    if not 0<detect<contrast<1 or not 0<ranking_detect<ranking_contrast<1 or bootstrap<0:
+        raise ValueError('Invalid contrast/ranking detection/bootstrap')
     records=list(read_records(test_file))
     if not records or any(r.get('experimental_split')!='test' for r in records):
         raise ValueError('CBC study requires frozen held-out --split test records')
@@ -306,7 +307,9 @@ def study(test_file,models,contrast=.20,detect=.05,bootstrap=2000,max_examples=8
         training_meta={key:model.meta.get(key) for key in (
             'epochs','optimizer_updates_per_epoch','optimizer_updates_total',
             'active_parameter_count','total_parameter_count','seed','contrast_weight','rank_weight',
-            'contrastive_scenes_per_epoch','contrastive_pairs_per_epoch','contrast_threshold')}
+            'contrastive_scenes_per_epoch','contrastive_pairs_per_epoch','contrast_threshold',
+            'rank_threshold','reference_alpha','ranking_scenes_per_epoch',
+            'ranking_pairs_per_epoch','candidate_arrival_kernel_shift')}
         training_meta['training_scene_set_sha256']=train_digest
         checksums[name]={'checkpoint_sha256':sha256(Path(checkpoint).read_bytes()).hexdigest(),
                          'model_variant':model.variant,
@@ -315,7 +318,17 @@ def study(test_file,models,contrast=.20,detect=.05,bootstrap=2000,max_examples=8
     details={name:[_score_prediction(row,p,contrast,detect) for row,p in zip(records,pred)]
              for name,pred in predictions.items()}
     aggregates={name:_aggregate(d) for name,d in details.items()}
+    # The critical gate remains deliberately strict.  A separate lower
+    # threshold reports whether the model has directional information on
+    # finite-reference-resolved subcritical boundaries.  It is not merged
+    # into the critical miss or safety-certificate denominator.
+    ranking_details={name:[_score_prediction(row,p,ranking_contrast,ranking_detect)
+                           for row,p in zip(records,pred)]
+                     for name,pred in predictions.items()}
+    ranking_aggregates={name:_aggregate(d) for name,d in ranking_details.items()}
     paired={name:_bootstrap(d,details['source'],n_boot=bootstrap) for name,d in details.items() if name!='source'}
+    ranking_paired={name:_bootstrap(d,ranking_details['source'],n_boot=bootstrap)
+                    for name,d in ranking_details.items() if name!='source'}
     # Critical counterfactual controls for the *incremental* CBC claim:
     # an anchor-only graph must beat the no-adjustment anchor-copy at the
     # same single-anchor rollout budget. An event-feature head must beat the
@@ -336,6 +349,13 @@ def study(test_file,models,contrast=.20,detect=.05,bootstrap=2000,max_examples=8
                           if 'full_contrast' in details and 'full' in details else {})
     paired_graph_contrast=(_bootstrap(details['anchor_graph_contrast'],details['anchor_graph'],n_boot=bootstrap)
                            if 'anchor_graph_contrast' in details and 'anchor_graph' in details else {})
+    ranking_paired_graph=(_bootstrap(ranking_details['anchor_graph'],ranking_details['anchor_full'],n_boot=bootstrap)
+                          if 'anchor_graph' in ranking_details and 'anchor_full' in ranking_details else {})
+    ranking_paired_delay_kernel=(_bootstrap(ranking_details['delay_kernel_rank'],
+                                            ranking_details['anchor_graph_delay_kernel'],
+                                            n_boot=bootstrap)
+                                 if 'delay_kernel_rank' in ranking_details and
+                                 'anchor_graph_delay_kernel' in ranking_details else {})
     # Return only bounded-size, predeclared examples. No raw trajectories,
     # no source-world tensor dump, and no train/calibration target records.
     cases=[]
@@ -356,7 +376,11 @@ def study(test_file,models,contrast=.20,detect=.05,bootstrap=2000,max_examples=8
             'test_scenes':len(records),'reference_families':records[0]['audit_families'],
             'reference_worlds_per_family':records[0]['audit_worlds_per_family'],
             'critical_pair_abs_delta_threshold':contrast,'predicted_detection_threshold':detect,
+            'ranking_pair_abs_delta_threshold':ranking_contrast,
+            'ranking_predicted_detection_threshold':ranking_detect,
             'methods':aggregates,'paired_scene_bootstrap_method_minus_source':paired,
+            'ranking_methods':ranking_aggregates,
+            'paired_scene_bootstrap_ranking_method_minus_source':ranking_paired,
             'paired_scene_bootstrap_method_minus_anchor_copy':paired_vs_anchor,
             'paired_scene_bootstrap_full_minus_no_events':paired_events,
             'paired_scene_bootstrap_anchor_graph_minus_anchor_full':paired_graph,
@@ -365,6 +389,8 @@ def study(test_file,models,contrast=.20,detect=.05,bootstrap=2000,max_examples=8
             'paired_scene_bootstrap_delay_kernel_rank_minus_delay_kernel':paired_delay_kernel_rank,
             'paired_scene_bootstrap_full_contrast_minus_full':paired_full_contrast,
             'paired_scene_bootstrap_anchor_graph_contrast_minus_anchor_graph':paired_graph_contrast,
+            'paired_scene_bootstrap_ranking_anchor_graph_minus_anchor_full':ranking_paired_graph,
+            'paired_scene_bootstrap_ranking_delay_kernel_rank_minus_delay_kernel':ranking_paired_delay_kernel,
             'source_worlds_per_candidate':records[0].get('source_worlds'),
             'reference_worlds_per_candidate':len(records[0]['audit_families'])*int(records[0]['audit_worlds_per_family']),
             'checkpoints':checksums,'interesting_test_cases_bounded':cases,

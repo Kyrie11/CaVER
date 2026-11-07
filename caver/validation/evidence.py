@@ -40,6 +40,14 @@ class Calibration:
     label_scope: str = 'SIMULATED_REFERENCE_CONDITIONAL_MEANS'
     quantiles_by_kind: dict[str,float] = field(default_factory=dict)
     mc_buffers_by_kind: dict[str,float] = field(default_factory=dict)
+    # Risk admission uses the one-sided upper residual because an
+    # overestimate of a risk coordinate should not widen its upper endpoint.
+    # Choice regret still needs the lower endpoint, so both tails are retained.
+    upper_quantiles_by_kind: dict[str,float] = field(default_factory=dict)
+    lower_quantiles_by_kind: dict[str,float] = field(default_factory=dict)
+    nonconformity: str = 'TWO_SIDED_ABSOLUTE_COMPATIBILITY'
+    alpha_upper: float | None = None
+    alpha_lower: float | None = None
 
     def interval(self, p, scale=1.0, key=None):
         if not self.valid or not np.isfinite(p) or not (0 <= p <= 1):
@@ -47,8 +55,12 @@ class Calibration:
         kind=risk_kind(key) if key is not None else None
         q=self.quantiles_by_kind.get(kind,self.quantile)
         b=self.mc_buffers_by_kind.get(kind,self.mc_buffer)
-        radius = q * scale + b
-        return max(0., float(p) - radius), min(1., float(p) + radius)
+        q_upper=self.upper_quantiles_by_kind.get(kind,q)
+        q_lower=self.lower_quantiles_by_kind.get(kind,q)
+        lower_radius = q_lower * scale + b
+        upper_radius = q_upper * scale + b
+        return (max(0., float(p) - lower_radius),
+                min(1., float(p) + upper_radius))
 
     @classmethod
     def load(cls, path):
@@ -79,28 +91,49 @@ def conformal_calibrate(samples, alpha=.1, audit_worlds=32, mc_delta=.05,
         raise ValueError('Risk-coordinate mismatch between reference and prediction')
     n = len(samples)
     kinds=sorted({risk_kind(k) for x in keys for k in x})
-    alpha_kind=alpha/max(1,len(kinds)); delta_kind=mc_delta/max(1,len(kinds))
+    # Split the total calibration error between the upper and lower tails
+    # before allocating it across risk kinds.  This matches the union bound
+    # used by the DSE coverage statement.
+    alpha_upper=alpha/2.; alpha_lower=alpha/2.
+    alpha_kind=alpha_upper/max(1,len(kinds)); delta_kind=mc_delta/max(1,len(kinds))
     scores_by_kind={kind:[] for kind in kinds}
+    upper_scores_by_kind={kind:[] for kind in kinds}
+    lower_scores_by_kind={kind:[] for kind in kinds}
     for row in samples:
         row_scores={kind:0. for kind in kinds}
+        row_upper={kind:0. for kind in kinds}
+        row_lower={kind:0. for kind in kinds}
         for key, p in row['predicted'].items():
             mu_hat = float(row['audited'][key])
             if not np.isfinite(p) or not np.isfinite(mu_hat) or not (0 <= p <= 1 and 0 <= mu_hat <= 1):
                 raise ValueError('Risk means must be finite in [0,1]')
             kind=risk_kind(key)
-            row_scores[kind]=max(row_scores[kind],abs(float(p)-mu_hat))
-        for kind in kinds:scores_by_kind[kind].append(row_scores[kind])
+            prediction=float(p)
+            row_scores[kind]=max(row_scores[kind],abs(prediction-mu_hat))
+            row_upper[kind]=max(row_upper[kind],mu_hat-prediction,0.)
+            row_lower[kind]=max(row_lower[kind],prediction-mu_hat,0.)
+        for kind in kinds:
+            scores_by_kind[kind].append(row_scores[kind])
+            upper_scores_by_kind[kind].append(row_upper[kind])
+            lower_scores_by_kind[kind].append(row_lower[kind])
     q_by={};b_by={}
+    upper_q_by={};lower_q_by={}
     for kind in kinds:
         kk=math.ceil((n+1)*(1-alpha_kind))
         q_by[kind]=1. if kk>n else float(np.sort(scores_by_kind[kind])[kk-1])
+        upper_q_by[kind]=1. if kk>n else float(np.sort(upper_scores_by_kind[kind])[kk-1])
+        lower_q_by[kind]=1. if kk>n else float(np.sort(lower_scores_by_kind[kind])[kk-1])
         count=sum(1 for x in keys if any(risk_kind(k)==kind for k in x))
         b_by[kind]=math.sqrt(math.log(2*max(1,count)/delta_kind)/(2*audit_worlds))
     q=max(q_by.values(),default=1.);radius=max(b_by.values(),default=0.)
     return Calibration(q, alpha, n, audit_worlds, mc_delta, radius,
                        list(reference_families or []), predictor_digest,
                        'EPISODE_DISJOINT_CALIBRATION', procedure=procedure,
-                       quantiles_by_kind=q_by, mc_buffers_by_kind=b_by)
+                       quantiles_by_kind=q_by, mc_buffers_by_kind=b_by,
+                       upper_quantiles_by_kind=upper_q_by,
+                       lower_quantiles_by_kind=lower_q_by,
+                       nonconformity='ONE_SIDED_UPPER_AND_LOWER_EPISODE_MAX',
+                       alpha_upper=alpha_upper,alpha_lower=alpha_lower)
 
 
 def risk_intervals(pred, calibration=None):
