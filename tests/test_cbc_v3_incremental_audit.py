@@ -269,30 +269,42 @@ def test_component_gain_requires_joint_metrics_ci_and_equal_budget_metadata(tmp_
             'anchor_full':{'reference_resolved_sign_error_rate':.20,
                            'critical_pair_underresolution_rate':.30,
                            'critical_pair_miss_rate':.40,
+                           'downstream_union_resolved_sign_error_rate':.20,
+                           'downstream_union_resolved_underresolution_rate':.30,
                            'matched_ego_safe_safety_ranking_regret':.10},
             'anchor_graph':{'reference_resolved_sign_error_rate':.10,
                             'critical_pair_underresolution_rate':.20,
                             'critical_pair_miss_rate':.30,
+                            'downstream_union_resolved_sign_error_rate':.10,
+                            'downstream_union_resolved_underresolution_rate':.20,
                             'matched_ego_safe_safety_ranking_regret':.05,
                             'downstream_union_reference_risk_mae':.20},
             'full':{'reference_resolved_sign_error_rate':.10,
                     'critical_pair_underresolution_rate':.20,
                     'critical_pair_miss_rate':.30,
+                    'downstream_union_resolved_sign_error_rate':.10,
+                    'downstream_union_resolved_underresolution_rate':.20,
                     'matched_ego_safe_safety_ranking_regret':.05},
             'no_events':{'reference_resolved_sign_error_rate':.20,
                          'critical_pair_underresolution_rate':.30,
                          'critical_pair_miss_rate':.40,
+                         'downstream_union_resolved_sign_error_rate':.20,
+                         'downstream_union_resolved_underresolution_rate':.30,
                          'matched_ego_safe_safety_ranking_regret':.10},
         },
         'paired_scene_bootstrap_anchor_graph_minus_anchor_full':{
             key:ci() for key in ('reference_resolved_sign_error_rate',
                                  'critical_pair_underresolution_rate',
                                  'critical_pair_miss_rate',
+                                 'downstream_union_resolved_sign_error_rate',
+                                 'downstream_union_resolved_underresolution_rate',
                                  'matched_ego_safe_safety_ranking_regret')},
         'paired_scene_bootstrap_full_minus_no_events':{
             key:ci() for key in ('reference_resolved_sign_error_rate',
                                  'critical_pair_underresolution_rate',
                                  'critical_pair_miss_rate',
+                                 'downstream_union_resolved_sign_error_rate',
+                                 'downstream_union_resolved_underresolution_rate',
                                  'matched_ego_safe_safety_ranking_regret')},
         'checkpoints':{
             'anchor_graph':{'training_meta':{**common_meta,'active_parameter_count':25371}},
@@ -306,6 +318,19 @@ def test_component_gain_requires_joint_metrics_ci_and_equal_budget_metadata(tmp_
     gated=summarize(f)
     assert gated['novelty_verdict']=='PRELIMINARY_SIMULATOR_CONDITIONAL_COMPONENT_GAIN'
     assert gated['incremental_ablation']['graph_equal_budget_audit']['status']=='MATCHED'
+
+    # All six predeclared metrics need bootstrap evidence. Missing either
+    # downstream-union metric must not silently pass as a component gain.
+    bootstrap_keys=('paired_scene_bootstrap_anchor_graph_minus_anchor_full',
+                    'paired_scene_bootstrap_full_minus_no_events')
+    for key in bootstrap_keys:
+        report[key].pop('downstream_union_resolved_underresolution_rate')
+    f.write_text(json.dumps(report))
+    gated=summarize(f)
+    assert gated['novelty_verdict']=='DESCRIPTIVE_COMPONENT_GAIN_NOT_STATISTICALLY_RESOLVED'
+    assert gated['incremental_ablation']['anchor_graph_minus_equal_anchor_budget_without_graph']['status']=='NOT_MEASURED'
+    for key in bootstrap_keys:
+        report[key]['downstream_union_resolved_underresolution_rate']=ci()
 
     # If training metadata is absent, a statistically favorable CI alone is
     # not enough to claim a component gain at equal budget.
